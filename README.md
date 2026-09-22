@@ -113,7 +113,7 @@ For Facemotion3d (with the “Other” license), pass `app="facemotion3d"` to `V
 
 ## Reference and troubleshooting
 
-[Wire specification (Japanese)](PROTOCOL_V3.md) · [Transmit diagram](diagrams/FMV3_PC_to_iOS_EN.png) · [Receive diagram](diagrams/FMV3_iOS_to_PC_EN.png) · [Diagram text (English)](diagrams/DIAGRAM_TEXT_EN.md) · [Expected byte vectors](golden_vectors.json)
+[Wire specification (English)](PROTOCOL_V3.md) · [Japanese specification](PROTOCOL_V3_JA.md) · [Transmit diagram](diagrams/FMV3_PC_to_iOS_EN.png) · [Receive diagram](diagrams/FMV3_iOS_to_PC_EN.png) · [Diagram text (English)](diagrams/DIAGRAM_TEXT_EN.md) · [Expected byte vectors](golden_vectors.json)
 
 The documents, diagrams and byte vectors are **not runtime dependencies**. The byte vectors are optional answer keys for another-language implementation. Maintainer tests and old result logs are deliberately not included in this small sample; the simulated exchange is not a substitute for real-device testing.
 

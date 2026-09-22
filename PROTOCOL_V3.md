@@ -1,328 +1,334 @@
-# Face Motion v3 共通通信仕様 — 標準ポート版（contract_revision = 4）
+# Face Motion v3 Common Wire Protocol — Standard Ports (`contract_revision = 4`)
 
-文書日付: 2026-09-18。対象: iFacialMocap / iFacialMocapTr / Facemotion3d。通信仕様の正本はこのファイル。
-送受信の通信形式はこの仕様に従う。`face_motion_v3.py` は受信側の参照実装、`simulate_ios_v3.py` は合成データによる模擬送信側である。iOS用Codex指示文・保守用テストは、この小規模配布には含めない。
-iOS側はこの仕様に沿った実装が必要。`contract_revision = 4` は通信形式の識別値であり、Codexへの指示回数やiOSへの実装回数ではない。
+Source document date: 2026-09-18. Applies to iFacialMocap / iFacialMocapTr / Facemotion3d. This document specifies the wire protocol.
+The data transmitted and received must follow this specification. `face_motion_v3.py` is the reference receiver; `simulate_ios_v3.py` is a synthetic sender. The small distribution does not include the iOS Codex instructions or the maintainer's test suite.
+The iOS implementation must follow this specification. `contract_revision = 4` identifies the wire format; it is not the number of Codex instructions issued or the number of times the iOS code has been implemented.
 
-## 対応アプリと最低バージョン
+> **English edition — documentation corrections dated 2026-09-22:** This edition and the [Japanese specification](PROTOCOL_V3_JA.md) have been updated together following the recheck. The corrections clarify the pending-HELLO ERROR exception, the scope of the UDP schema-send rate limit, and initial-schema validation on a new TCP connection. Header/payload layouts, field names, numeric constants, ports, and `contract_revision = 4` are unchanged. Appendix A records known differences in the reviewed code snapshot; it does not authorize those differences or mean that the code has been fixed.
 
-| アプリ | 対応バージョン |
+## Supported apps and minimum versions
+
+| App | Supported version |
 |---|---|
-| **iFacialMocap** | **1.5.3以降** |
-| **iFacialMocapTr** | **1.2.6以降** |
-| **Facemotion3d** | **1.4.6以降** |
+| **iFacialMocap** | **1.5.3 or later** |
+| **iFacialMocapTr** | **1.2.6 or later** |
+| **Facemotion3d** | **1.4.6 or later** |
 
-**このサンプルは、上記の各バージョン以降のアプリのみ対応しています。それ以前のバージョンには対応していません。** 最低バージョン未満のアプリをお使いの場合は、アプリを更新してから実行してください。
+**This sample supports only the versions listed above and later versions of each app. Earlier versions are not supported.** Update the app before running the sample if it is below the listed minimum version.
 
-## 最初に読む — 再試行が終わってもPCを終了しない
+## Read first — do not exit the PC receiver when retries run out
 
-この仕様は **FRAME専用監視 + 回数制限付き復旧 + 無期限の受信待機 + iOS手動送信** を備える。
-通常のUDP開始では、対応表の受信確認を必須にする。
+This specification provides **FRAME-specific monitoring + bounded recovery attempts + indefinite receive-only waiting + manual sending from iOS**.
+Normal UDP startup requires acknowledgement that the schema has been received.
 
 ```text
-対応表保存・ACK送信 → 数値待ち → 3秒届かない → 復旧を最大3回
-                                             ↓ まだ届かない
-                               最大12秒で「受信待機」へ
-                               ソケット・ポートは開いたまま
-                                             ↓ 後からiOSが手動送信
-                        SCHEMA受信 → 検証・保存 → ACK返信 → FRAME受信
+Store schema / send ACK -> wait for numeric data -> no FRAME for 3 s -> up to 3 recovery attempts
+                                                                            |
+                                                                  still no FRAME
+                                                                            v
+                                                    enter WAITING by the 12 s deadline
+                                                    keep the receiving socket/port open
+                                                                            |
+                                                        iOS starts sending manually later
+                                                                            v
+                                     receive SCHEMA -> validate/store -> reply with ACK -> receive FRAME
 ```
 
-PONGや対応表だけが届いても、FRAME専用の期限は延長しない。
-待機中はPCからの定期要求・再接続・PINGを止めるが、届いた正しい対応表にはACKを返す。
-停止はCtrl+C、stop_event、明示したduration、致命的なローカルエラー等で行う。無受信だけでは終了しない。
+Receiving only PONGs or schemas does not extend the FRAME-specific deadline.
+While waiting, the PC stops periodic requests, reconnection attempts, and PINGs, but replies with an ACK to a valid schema that arrives.
+Termination is explicit: Ctrl+C, `stop_event`, a specified `duration`, a fatal local error, or equivalent. Lack of incoming data alone does not terminate the receiver.
 
-## 通常のUDP開始 — 対応表の受信確認を待つ
+## Normal UDP startup — wait for acknowledgement of the schema
 
 ```text
 PC                                              iOS
  |                                               |
- |---- HELLO ----------------------------------->| ① v3を始めたい
+ |---- HELLO ----------------------------------->| (1) Request v3
  |                                               |
- |<--- SCHEMA [表7] -----------------------------| ② 開始情報 + この順番で送る
- |     全断片をそろえ、検証・保存する             |    数値はまだ送らない
+ |<--- SCHEMA [id 7] ----------------------------| (2) Start information + field order
+ |     Collect all fragments; validate/store     |     Do not send numeric data yet
  |                                               |
- |---- SCHEMA_ACK [表7] ------------------------>| ③ 表7を保存できた
- |                                               |    session / 送信元 / 表番号を確認
- |<--- FRAME [表7] ------------------------------| ④ ここから数値を送る
- |<--- FRAME [表7] ------------------------------|    以降、繰り返し
+ |---- SCHEMA_ACK [id 7] ----------------------->| (3) Schema 7 has been stored
+ |                                               |     Check session / sender / schema ID
+ |<--- FRAME [id 7] -----------------------------| (4) Start sending numeric data
+ |<--- FRAME [id 7] -----------------------------|     Repeat from here
 ```
 
-**③は二度目の開始要求でも、「開始OK」という返答でもない。②がPCに届いたことの受信確認。**
-SCHEMAが開始の返答も兼ねる。開始を肯定する専用パケットや、別の送信開始許可パケットは使わない。
+**Step (3) is neither a second start request nor a separate “start accepted” response. It acknowledges that step (2) reached the PC.**
+SCHEMA also serves as the response to the start request. Do not introduce a dedicated positive-start response or a separate permission-to-start packet.
 
-**UDPでは初回・対応表変更時とも、現在の表のSCHEMA_ACKをiOSが受信するまでFRAME送信を禁止する。**
-届かないときは表を再送する。対応表の取りこぼしと、ACK自体の取りこぼしの両方から復帰する。
-TCPは順序付きストリームとして `HELLO → SCHEMA → FRAME` とし、アプリ層のSCHEMA_ACKは要求しない。
-PCが表を保存できなければ数値を解釈せず、エラーとして切断する。
+**On UDP, both at startup and after a schema change, iOS must not send FRAME until it has received SCHEMA_ACK for the current schema.**
+If the acknowledgement does not arrive, retransmit the schema. The exchange must recover from a lost schema as well as a lost ACK.
+TCP is an ordered stream: `HELLO -> SCHEMA -> FRAME`. An application-layer SCHEMA_ACK is not required.
+If the PC cannot store the schema, it must not interpret subsequent numeric data; disconnect with an error.
 
-数値1フレームごとのACK・再送はしない。詳しい更新手順は **5.4**、再送は **7.1〜7.4**。
-起動手順は `README_JA.md`。送信側のACK待ち・再送の参照処理は `simulate_ios_v3.py` 内の `SchemaDelivery` に収録している。
+There is no application-layer acknowledgement or retransmission for each individual numeric FRAME. See **5.4** for schema changes and **7.1–7.4** for retransmission.
+See `README.md` for startup commands. The reference sender-side ACK/retry logic is the `SchemaDelivery` class inside `simulate_ios_v3.py`.
 
-## 1. 目的・互換性・接続
+## 1. Purpose, compatibility, and connections
 
-「変更可能な対応表」＋「その表の間だけ固定順序」＋「バイナリ全項目値」。52個固定にしない。
-対応表だけはUTF-8 JSON。FRAMEには名前・JSON・CSV・圧縮・Base64・文字列の区切りを入れない。
-値0も省略せず、差分送信や前フレーム参照、古いFRAMEの再送はしない。
+Use a **changeable schema**, an **order fixed for the lifetime of that schema**, and **binary values for every field**. Do not hard-code a count of 52.
+Only the schema is UTF-8 JSON. FRAME must not contain names, JSON, CSV, compression, Base64, or text delimiters.
+Do not omit zero values. Do not use delta encoding, references to a previous frame, or retransmission of old FRAMEs.
 
-### 標準ポートと接続方向
+### Standard ports and connection directions
 
-v3のための新しい専用ポートは作らず、既存アプリの待受にv3の振り分けを追加する。
+Do not create new, dedicated ports for v3. Add v3 dispatch to the existing app listeners.
 
-| アプリ | 通信 | iOSの通常開始待受 | PCの受信待受（手動開始・復帰にも使用） |
+| App | Transport | iOS listener for normal startup | PC receive listener, also used for manual startup/recovery |
 |---|---|---:|---:|
 | iFacialMocap | UDP | 49983 | 49983 |
 | iFacialMocap | TCP | 49984 | 49986 |
 | Facemotion3d | UDP | 49993 | 49983 |
 | Facemotion3d | TCP | 49994 | 49986 |
 
-- UDPではPCがこのPC側ポートへbindしてHELLOを送り、iOSは**HELLOを受信した既存ソケット**からPCの実際の送信元IP・ポートへ返信する。同じPCソケットで全データを受ける。
-- TCPの通常開始はPCが表のiOSポートへ接続し、HELLO/SCHEMA/FRAME/制御を**その1本**でやり取りする。PCの接続元はOSの一時ポートでよい。PCの49986番listenerは手動開始・待機復帰用として並行して開くもので、通常の接続の返信先を49986へ張り直す意味ではない。
-- TCPの手動開始はiOSがPC:49986へ接続し、HELLOなしでSCHEMA→FRAMEを送る。同じ接続で制御を読む。v3のTCPモードにはUDPを要求しない。
-- iFacialMocapの**公開されている既存TCP方式**（UDP49983へ旧開始文字列→iOSからPC:49986へTCP接続）は、そのまま別の既存経路として残す。本書のPC発v3 TCPは、添付コードの`startListener()`が使う**直接TCPの49984**を共用する。49985の既存別listenerや49987の録画経路も変更しない。
-- Facemotion3dの49993はiOSの標準UDPコマンド受信。PC側49983はOtherの既定設定・公式Python例を基準にする。ただし元コードには自動接続時にPC49993へ送る分岐もある。**その既存分岐を49983へ変更しない。** v3のPCは`--listen-port 49993`でも起動できる。既存互換用のiOS UDP49983も閉じたり移したりしない。
-- `--app ifacialmocap`（既定）/`--app facemotion3d`と`--transport`でPythonの既定値を決める。`--port`はiOS接続先、`--listen-port`はPC待受の上書き。これはポートの選択であって送信元の認証ではない。
-- 手動送信時はユーザーが選んだIP・ポートを使う。既存の保存設定・既存形式のデフォルトは上書きしない。既存ユーザー設定が別ポートなら、両側の明示設定を合わせる。
-- bind済みPCソケット/listenerは無受信だけでは閉じない。標準ポートを他アプリが使用中なら明確なエラーにし、黙って別ポートへ逃がしたり別プロセスを終了したりしない。
-- PCとiOSは通常別の端末なので、UDPに同じ番号を使ってよい。1台のPCで模擬送信と受信を両方動かす場合だけ、送信側ポートを明示的に変えるなどしてローカルbindの衝突を避ける。
+- For UDP, the PC binds to the PC-side port above and sends HELLO. iOS replies from **the existing socket that received HELLO** to the PC's actual source IP address and port. The same PC socket receives all data.
+- For normal TCP startup, the PC connects to the iOS port above. HELLO, SCHEMA, FRAME, and control messages all use **that one connection**. The PC may use an OS-assigned ephemeral source port for this connection. The PC's port 49986 listener remains open alongside it for manual startup and resumption from waiting; it does not mean opening another connection to port 49986 for replies to the normal connection.
+- For manual TCP startup, iOS connects to PC:49986 and sends SCHEMA followed by FRAME without HELLO. It reads control messages on the same connection. The v3 TCP mode does not require UDP.
+- Preserve iFacialMocap's **publicly documented legacy TCP mode** as a separate existing path: a legacy start string goes to UDP49983, then iOS connects to PC:49986 over TCP. PC-initiated v3 TCP in this specification shares the **direct TCP49984** listener used by `startListener()` in the original iOS code. Do not change the separate existing listener on 49985 or the recorded-data path on 49987.
+- Facemotion3d uses 49993 for standard iOS UDP command reception. PC-side 49983 follows the Other output's default setting and the official Python example. However, the original code also has an automatic-connection branch that sends to PC49993. **Do not change that existing branch to 49983.** The v3 PC receiver can also be started with `--listen-port 49993`. Do not close or move the existing compatibility listener on iOS UDP49983.
+- `--app ifacialmocap` (default) / `--app facemotion3d` and `--transport` select the Python defaults. `--port` overrides the iOS destination port; `--listen-port` overrides the PC listening port. This selects ports; it does not authenticate a sender.
+- Manual sending uses the IP address and port selected by the user. Do not overwrite saved settings or defaults for existing formats. If existing user settings specify a different port, match the explicit settings at both ends.
+- Do not close an already-bound PC socket/listener merely because data is not arriving. If another app owns the standard port, report a clear error. Do not silently switch ports or terminate another process.
+- The PC and iOS normally run on different devices, so they can use the same UDP port number. Only when running both the simulator and receiver on one PC must you avoid a local bind conflict, for example by explicitly choosing a different sender port.
 
-IPv4が標準。Pythonは--bindで選んだIPv4/IPv6のどちらか1 familyを使う。IPv6は--bind ::を指定する。Windows・macOS・IPv6実機での検証は別途必要。
+IPv4 is the default. Python uses one address family, IPv4 or IPv6, selected by `--bind`. Use `--bind ::` for IPv6. Validation on Windows, macOS, and real IPv6 devices is separately required.
 
-**HELLO本文末尾とSCHEMA開始情報のcontract_revisionには、定数4を設定する。**
-4以外のcontract_revisionは拒否する。手動開始のnonce=0と無期限受信待機を含む、この通信仕様であることを両側で確認する。
-メッセージ種類番号2は予約値であり、使用しない。受信側もtype=2を受け入れない。
-使用できるメッセージは3節の一覧に限る。対応表の分割にもSCHEMAと共通ヘッダーを使い、開始・途中・終了を示す別の種類は作らない。
-iOS側は同梱Python・仕様・テストに一致させる。異なるcontract_revisionへの自動フォールバックはしない。
+**Set `contract_revision` to the constant 4 in both the end of the HELLO payload and the SCHEMA start information.**
+Reject any `contract_revision` other than 4. Both ends must identify this specification, including manual startup with nonce=0 and indefinite receive waiting.
+Message type 2 is reserved and must not be used. Receivers must not accept type=2 either.
+Use only the message types listed in Section 3. Fragment a schema using SCHEMA and the common header; do not add separate start, continuation, or end message types.
+The iOS implementation must agree with the reference Python, specification, and tests. Do not automatically fall back to a different `contract_revision`.
 
-ライブおよび録画のライブ再生が対象。録画一括転送・FBX・音声ファイル・ボディデータ・DCC固有ブリッジは既存経路を維持。
-Bluetoothの追加・削除・置き換えは行わない。v3は同時に1クライアント。既存転送を横取りしない。
+The scope is live data and live playback of recordings. Preserve the existing paths for bulk recording transfer, FBX, audio files, body data, and DCC-specific bridges.
+Do not add, remove, or replace Bluetooth functionality. v3 supports one client at a time. Do not take over an existing transfer.
 
-### 既存形式との共存
+### Coexistence with existing formats
 
-既存の受信口を一つだけ使い、先頭の`FMV3`で形式を振り分ける。非v3データは従来処理へ渡し、不正なv3データを従来の文字列コマンドとして再解釈しない。v3 codecを分離することと、待受ポートを増やすことを混同しない。
+Use one existing receive endpoint and dispatch by the leading `FMV3` bytes. Pass non-v3 data to the existing handler. Do not reinterpret malformed v3 data as a legacy text command. Separating the v3 codec is not the same as adding listening ports.
 
-## 2. 共通ヘッダー — 全メッセージの最初の40バイト
+## 2. Common header — the first 40 bytes of every message
 
-全整数・Float32は **リトルエンディアン、パディングなし**。
-Python: `struct.Struct("<4sBBHQIIIIHHI")`。Swift構造体のメモリをそのまま送らず、各値を順に書く。
+All integers and Float32 values are **little-endian, with no padding**.
+Python: `struct.Struct("<4sBBHQIIIIHHI")`. Do not send the native memory image of a Swift struct; write each value in order.
 
-| Offset | サイズ | 型 | 内容 |
+| Offset | Size | Type | Meaning |
 |---:|---:|---|---|
 | 0 | 4 | bytes | ASCII `FMV3` = `46 4d 56 33` |
 | 4 | 1 | UInt8 | message_type |
-| 5 | 1 | UInt8 | flags。FRAME以外は0 |
+| 5 | 1 | UInt8 | flags; 0 except on FRAME |
 | 6 | 2 | UInt16 | header_size = 40 |
-| 8 | 8 | UInt64 | session_id。HELLOだけはclient_nonce。いずれも0禁止 |
+| 8 | 8 | UInt64 | Session identifier. Use client_nonce for HELLO and for an ERROR rejecting a pending HELLO; otherwise use the iOS-generated session_id. Must be nonzero |
 | 16 | 4 | UInt32 | schema_id |
 | 20 | 4 | UInt32 | sequence |
-| 24 | 4 | UInt32 | source_token。**FRAMEのみ**で使用。SCHEMAを含め、他は0 |
-| 28 | 4 | UInt32 | total_payload_length。分割前の本文長。ヘッダーを除く |
-| 32 | 2 | UInt16 | part_index。0始まり |
-| 34 | 2 | UInt16 | part_count。非分割なら1 |
-| 36 | 4 | UInt32 | chunk_length。このパケットに入る本文長 |
-| 40 | 可変 | bytes | 本文、またはその断片 |
+| 24 | 4 | UInt32 | source_token; used **only on FRAME**. 0 on every other message, including SCHEMA |
+| 28 | 4 | UInt32 | total_payload_length; payload length before fragmentation, excluding the header |
+| 32 | 2 | UInt16 | part_index; zero-based |
+| 34 | 2 | UInt16 | part_count; 1 if unfragmented |
+| 36 | 4 | UInt32 | chunk_length; number of payload bytes in this packet |
+| 40 | variable | bytes | Payload, or a payload fragment |
 
-FRAME flags: bit0=トラッキング中、bit1=録画のライブ再生中。その他は0。
-SCHEMA/FRAME/SCHEMA_ACKのschema_idは非0。GET_SCHEMAは要求IDまたは0（最新）。その他は0。
-sequenceはFRAME/PING/PONG/ERROR以外は0。ERRORは0推奨。SCHEMA再送のsequenceは常に0。
+FRAME flags: bit0 = currently tracking; bit1 = live playback of a recording. All other bits are 0.
+SCHEMA, FRAME, and SCHEMA_ACK require a nonzero `schema_id`. GET_SCHEMA uses the requested ID or 0 for the latest schema. All other message types use 0.
+`sequence` is 0 except on FRAME, PING, PONG, and ERROR. 0 is recommended for ERROR. A retransmitted SCHEMA always has sequence=0.
 
-## 3. メッセージ一覧
+## 3. Message types
 
-| type（10進） | 名称 | 方向 | 本文 |
+| Type (decimal) | Name | Direction | Payload |
 |---:|---|---|---|
-| 1 | HELLO | PC → iOS | 開始要求、8バイト |
-| 3 | SCHEMA | iOS → PC | **開始情報20バイト + 対応表JSON** |
-| 4 | FRAME | iOS → PC | 対応表順の整数配列 + 頭・目の12個のFloat32 |
-| 5 | GET_SCHEMA | PC → iOS | 空。対応表の再送要求 |
-| 6 | PING | PC → iOS | 空。接続維持 |
-| 7 | PONG | iOS → PC | 空。PINGと同じsequence |
-| 8 | STOP | PC → iOS | 空。該当v3セッションのみ終了 |
-| 9 | ERROR | iOS → PC | UTF-8の理由、1〜512バイト |
-| 10 | SCHEMA_ACK | PC → iOS | 空。検証・保存済みのschema_id。**UDPでは必須** |
+| 1 | HELLO | PC -> iOS | Start request, 8 bytes |
+| 3 | SCHEMA | iOS -> PC | **20-byte start information + schema JSON** |
+| 4 | FRAME | iOS -> PC | Integer array in schema order + 12 Float32 head/eye values |
+| 5 | GET_SCHEMA | PC -> iOS | Empty; request retransmission of a schema |
+| 6 | PING | PC -> iOS | Empty; keep the session alive |
+| 7 | PONG | iOS -> PC | Empty; same sequence as the PING |
+| 8 | STOP | PC -> iOS | Empty; end only the corresponding v3 session |
+| 9 | ERROR | iOS -> PC | UTF-8 reason, 1–512 bytes |
+| 10 | SCHEMA_ACK | PC -> iOS | Empty; identifies the validated, stored schema_id. **Required on UDP** |
 
-## 4. PCが最初に送る — HELLO
-
-```text
-[共通ヘッダー 40 B] [requested_fps 2 B] [max_udp_size 2 B] [contract_revision 4 B]
-                                              合計 48 B
-```
-
-本文: `<HHI`。requested_fpsは1〜60。max_udp_sizeは576〜1200（FRAMEのヘッダー込み上限）。contract_revisionは4。
-ヘッダーのsession_id欄には、PCが接続ごとに生成する非0ランダムUInt64 `client_nonce` を入れる。
-schema_id=sequence=source_token=flags=0、part_index=0、part_count=1、本文長は8。
-
-例: 60fps、1200バイト上限の本文は `3c 00 | b0 04 | 04 00 00 00`。
-実際には説明用の `|` は送らない。同梱 `golden_vectors.json` の `hello_hex` に全48バイトの例がある。
-
-iOSは購入状態・利用条件・他の転送との競合を確認して受諾する。失敗ならERRORのみ返す。PCは理由を表示して受信待機に移り、受信口は閉じない。
-受諾した場合は**次のSCHEMAを直ちに返す**。別の肯定応答は作らない。
-UDPはこの表のACK待ちへ入る。TCPはSCHEMAを先にキューへ入れればFRAMEを続けて送れる。
-表の準備に最初のAR更新が必要なら、利用可能になった時点で送る。PCの追加要求を待たない。
-5秒以内に準備できなければ短いERRORを返し、保留中の開始状態を解放する。
-
-同じ送信元/接続・同じnonce・同じHELLO内容の再送には、同じsession_idと現在のSCHEMAを返す。
-表の送信・再送はUDPではpeer単位で1秒に1回以下に制限し、フレーム番号・表番号・利用時間制限をリセットしない。
-同じHELLOの再送は、既存のACK待ち期限や確認済み状態もリセットしない。
-同じnonceで要求内容が変わった場合は拒否する。別peerまたは別nonceで利用中のセッションを置き換えない。
-
-## 5. iOSが返す — SCHEMA = 開始情報 + 対応表
-
-### 5.1 全体
+## 4. What the PC sends first — HELLO
 
 ```text
-[共通ヘッダー 40 B] [開始情報 20 B] [UTF-8 JSONの対応表 可変長]
-                      ↓               ↓
-                  通信条件を確定   名前と数値型を確定
+[Common header 40 B] [requested_fps 2 B] [max_udp_size 2 B] [contract_revision 4 B]
+                                                              Total: 48 B
 ```
 
-ヘッダーsession_idはiOSが新ストリームごとに生成する非0ランダムUInt64。
-schema_idは現在の表番号（1以上）。source_token=flags=sequence=0。
-初回だけでなく、更新・定期再送・再送要求への返答も、**すべてこの同じ本文構造**。
+Payload: `<HHI`. `requested_fps` is 1–60. `max_udp_size` is 576–1200, the maximum size of a FRAME datagram including its FMV3 header. `contract_revision` is 4.
+In the header's `session_id` field, place a random, nonzero UInt64 `client_nonce` generated by the PC for that connection attempt sequence.
+Set schema_id=sequence=source_token=flags=0, part_index=0, part_count=1, and payload length=8.
 
-### 5.2 開始情報（本文先頭20バイト）
+Example payload for 60 fps and a 1200-byte limit: `3c 00 | b0 04 | 04 00 00 00`.
+The explanatory `|` separators are not transmitted. `hello_hex` in the supplied `golden_vectors.json` contains a complete 48-byte example.
 
-Python: `struct.Struct("<QHHII")`。JSONは本文offset=20（非分割メッセージ全体ではoffset=60）から始まる。
+iOS checks purchase status, usage conditions, and conflicts with other transfers before accepting. On failure, return only ERROR. The PC displays the reason and enters receive-only waiting without closing its receive endpoint.
+On acceptance, **immediately return the following SCHEMA**. Do not send a separate positive acknowledgement.
+UDP then waits for acknowledgement of that schema. TCP may continue with FRAME once SCHEMA has been queued first.
+If building the schema requires the first AR update, send it as soon as that update is available; do not wait for another PC request.
+If it cannot be prepared within 5 seconds, return a short ERROR and release the pending startup state.
 
-| 本文Offset | サイズ | 型 | 内容 |
+A repeated HELLO from the same source/connection with the same nonce and contents returns the same `session_id` and the current SCHEMA.
+On UDP, limit schema sends/retransmissions to at most once per second per peer. Do not reset frame numbers, schema numbers, or usage-time limits.
+A repeated identical HELLO must not reset an existing ACK-wait deadline or an already-acknowledged state.
+Reject changed request contents with the same nonce. Do not replace an in-use session with a different peer or nonce.
+
+## 5. What iOS returns — SCHEMA = start information + schema
+
+### 5.1 Overall layout
+
+```text
+[Common header 40 B] [Start information 20 B] [UTF-8 schema JSON, variable length]
+                              |                              |
+                    Establish session settings    Establish names and numeric type
+```
+
+The header's `session_id` is a random, nonzero UInt64 generated by iOS for each new stream.
+`schema_id` is the current schema number, 1 or higher. Set source_token=flags=sequence=0.
+**Every SCHEMA uses this same payload layout**, including the initial schema, changes, periodic retransmissions, and responses to retransmission requests.
+
+### 5.2 Start information — the first 20 payload bytes
+
+Python: `struct.Struct("<QHHII")`. JSON starts at payload offset=20, or offset=60 from the start of an unfragmented message.
+
+| Payload offset | Size | Type | Meaning |
 |---:|---:|---|---|
-| 0 | 8 | UInt64 | client_nonce。通常開始はHELLOの非0値を返す。**iOS手動開始だけ0** |
-| 8 | 2 | UInt16 | actual_fps。1〜requested_fps |
-| 10 | 2 | UInt16 | max_udp_size。576〜要求値。FRAMEのUDP上限 |
-| 12 | 4 | UInt32 | lease_ms。標準10000、許容5000〜60000 |
+| 0 | 8 | UInt64 | client_nonce; echo the nonzero HELLO value for normal startup. **0 only for manual iOS startup** |
+| 8 | 2 | UInt16 | actual_fps; 1 through requested_fps |
+| 10 | 2 | UInt16 | max_udp_size; 576 through the requested limit, for FRAME UDP datagrams |
+| 12 | 4 | UInt32 | lease_ms; default 10000, permitted range 5000–60000 |
 | 16 | 4 | UInt32 | contract_revision = 4 |
 
-nonce・FPS・UDP上限・lease・revisionは同じセッション内では変更しない。
-設定上の実際の出力はactual_fpsより低くなってよい。上限自体の再交渉が必要なら新しいHELLO/セッションを使う。
-PCは**全断片・開始情報・JSONを検証してから**session_idと対応表を同時に採用する。
-一部の断片や先に届いたFRAMEだけからセッションを採用しない。
-通常開始の非0nonceは、その接続開始時にPCがHELLOで送った値と一致させる。**0は手動開始の専用印**で、受信待機を許可したPCだけが受け付ける。
-V3Clientは手動待機を有効にしている。低水準のReceiverCoreはallow_push=Trueを明示した場合だけ0を許可する。
-新sessionの採用はWAIT_SCHEMA（開始待ち）かWAITING（受信待機）の間に限る。
-配信中・初回FRAME待ち・復旧試行中の別sessionによる横取りは拒否する。
---hostがある場合は、そのホストのIPからの受信だけ許可する。UDPの返信先portは受け取った送信元port。
---hostなしの--listenは、信頼できるLAN上の任意送信元の受信をユーザーが明示許可する方式。
-完全な表の検証・on_schema成功後に新しいsessionを採用し、旧表・断片・sequenceを破棄する。
-置き換えた直近32件のendpoint/sessionは記憶して旧パケットへの巻き戻りを防ぐ。
-候補sessionの未完成対応表は同時に1件、3秒で破棄する。nonce=0は認証ではない。
+The nonce, FPS limit, UDP limit, lease, and revision do not change within a session.
+The configured actual output rate may be lower than `actual_fps`. If the upper bound itself needs renegotiation, use a new HELLO/session.
+The PC must validate **all fragments, the start information, and the JSON before** adopting the session_id and schema together.
+Do not adopt a session from partial fragments or a FRAME that arrives before the schema.
+For normal startup, the nonzero nonce must match the value in the PC's HELLO for that startup. **0 is reserved for manual startup** and is accepted only by a PC that permits receive waiting for manual senders.
+`V3Client` enables manual receive waiting. The lower-level `ReceiverCore` permits 0 only when `allow_push=True` is explicitly set.
+A new session may be adopted only in WAIT_SCHEMA (startup) or WAITING (receive-only waiting).
+Reject takeover by another session while streaming, waiting for the first FRAME, or performing recovery attempts.
+With `--host`, accept input only from that host's IP addresses. UDP replies go to the source port of the received packet.
+`--listen` without `--host` explicitly permits input from any sender on the trusted LAN.
+Adopt a new session only after full schema validation and successful completion of `on_schema`. Discard the old schema, fragments, and sequence state.
+Remember the 32 most recently replaced endpoint/session pairs to prevent rollback caused by old packets.
+Allow only one incomplete candidate-session schema at a time; discard it after 3 seconds. nonce=0 is not authentication.
 
-### 5.3 対応表JSON
+### 5.3 Schema JSON
 
-圧縮しないUTF-8 JSON。必須キーは次の9個。schema_version=1は「JSON表の形式」の版であり、契約番号4とは別。
+Uncompressed UTF-8 JSON. The following nine keys are required. schema_version=1 is the version of the **JSON schema format**, separate from contract revision 4.
 
 ```json
 {"schema_version":1,"app":"Facemotion3d","profile":"facemotion3d-other","blend_names":["eyeBlinkLeft","eyeBlinkRight","jawOpen","myCustomSmile"],"blend_encoding":"i16","blend_unit":"percent","pose_layout":"head_rxyz_pxyz_rightEye_rxyz_leftEye_rxyz","rotation_unit":"degree","position_unit":"meter"}
 ```
 
-app/profileは `iFacialMocap` / `ifacialmocap-stream` または `Facemotion3d` / `facemotion3d-other`。
-blend_namesの配列順が数値の送信順。i16またはi32を全項目共通で指定する。
+The app/profile pair is either `iFacialMocap` / `ifacialmocap-stream` or `Facemotion3d` / `facemotion3d-other`.
+The order of `blend_names` is the order of transmitted values. Specify either i16 or i32 for all BlendShape values in that schema.
 
-名前は大小文字を区別するUTF-8で一意。空文字不可、1〜255バイト、U+0000〜U+001F不可。
-項目数は0〜4096。これは異常入力対策の上限であり、種類や52個固定という意味ではない。
-SCHEMA本文全体は262144バイト以下。したがってJSON部分は262124バイト以下。
-JSONの重複キー・NaN等の非標準定数・未知/不足のキー・無効なUnicodeを拒否する。
+Names are case-sensitive, unique UTF-8 strings. Empty names are forbidden. Each name must be 1–255 bytes and must not contain U+0000–U+001F.
+The field count is 0–4096. This is a defensive limit against invalid input, not a fixed list of types or a fixed count of 52.
+The entire SCHEMA payload must be at most 262144 bytes; therefore, its JSON portion must be at most 262124 bytes.
+Reject duplicate JSON keys, nonstandard constants such as NaN, unknown or missing keys, and invalid Unicode.
 
-送信側は設定変更時だけ安定した順序を作り、キャッシュする。毎フレームDictionaryの列挙順を使わない。
-標準項目、FM_*、設定済み音声カスタムBlendShapeを含める。発声中のものだけにしない。
-非反応の独自項目は0のまま表に残す。標準名への意図した音声上書きは同じ1項目を使い、非反応時は基の値を維持する。
-リマップ等による意図しない重複名は診断し、曖昧な表を送らない。
+The sender builds and caches a stable order only when settings change. Do not enumerate a Dictionary to establish the order on every frame.
+Include standard fields, FM_* fields, and configured custom audio BlendShapes; do not include only fields currently triggered by speech.
+Keep inactive custom fields in the schema with values of 0. An intentional audio override of a standard name uses that same single field; when inactive, preserve the underlying value.
+Diagnose unintended duplicate names introduced by remapping or similar operations. Do not transmit an ambiguous schema.
 
-### 5.4 送信途中で対応表が変わるとき — UDPは一度停止して確認し直す
+### 5.4 When the schema changes during streaming — pause UDP and acknowledge again
 
-**単に数値が変わる場合と、対応表が変わる場合を区別する。**
+**Distinguish a numeric-value change from a schema change.**
 
-| 変更 | 新しい表とACKが必要か |
+| Change | New schema and acknowledgement needed? |
 |---|---|
-| jawOpenの値が20→30、顔を見失う、音声が反応する/止まる | 不要。そのままFRAMEに反映 |
-| 項目を追加・削除、名前を変更、並び順を変更 | 必要。schema_idを増やす |
-| i16からi32へ変更 | 必要。schema_idを増やす |
-| ScrapingValueのトークンだけ変更 | 不要。次のFRAMEヘッダーへ反映 |
+| jawOpen changes from 20 to 30; tracking is lost; audio becomes active/inactive | No. Reflect it in FRAME |
+| Add/remove a field, rename it, or change its order | Yes. Increase schema_id |
+| Change i16 to i32 | Yes. Increase schema_id |
+| Change only the ScrapingValue token | No. Reflect it in the next FRAME header |
 
-UDPは初版として**停止→新しい表→受信確認→再開**の方法に統一する。
-旧表で送信を続けながら新表へ切り替える二重配信は行わない。
+For this initial UDP design, use **pause -> new schema -> acknowledgement -> resume**.
+Do not continue sending using the old schema while transitioning to the new one as a parallel, dual-stream mechanism.
 
 ```text
 PC                                              iOS
- |<--- FRAME [表7] ------------------------------| 表7で送信中
+ |<--- FRAME [id 7] -----------------------------| Streaming with schema 7
  |                                               |
- |                                      設定変更：独自項目を追加
- |                                      FRAME送信を一時停止
- |<--- SCHEMA [表8] -----------------------------| 新しい表を送る
- |     全体を検証し、読み取り位置を更新する       |
- |---- SCHEMA_ACK [表8] ------------------------>| 表8の保存完了
+ |                                      Settings change: add a custom field
+ |                                      Pause FRAME transmission
+ |<--- SCHEMA [id 8] ----------------------------| Send the new schema
+ |     Validate everything; update field indices |
+ |---- SCHEMA_ACK [id 8] ----------------------->| Schema 8 has been stored
  |                                               |
- |<--- FRAME [表8] ------------------------------| 最新の数値から再開
- |<--- FRAME [表8] ------------------------------|
+ |<--- FRAME [id 8] -----------------------------| Resume with the latest values
+ |<--- FRAME [id 8] -----------------------------|
 ```
 
-**送信側の必須動作**
+**Required sender behavior**
 
-1. 設定変更を確定した時点で新しいschema_idを発行し、表・数値型・インデックスを不変スナップショットにする。
-2. UDPのFRAME送信を止める。まだOSへ渡していない旧表のFRAME/断片は破棄する。すでに送った旧パケットは取り消せない。
-3. 新しい表をキャッシュして送り、`WAIT_SCHEMA_ACK` にする。新表が多発する場合は最新1件へまとめ、送信上限1回/秒を守る。
-4. そのsession_id・送信元IP/ポート・現在のschema_idがすべて一致するACKを受信してから再開する。
-   古い表7・未来の表9・別セッション・別端末のACKで、表8の送信を開始してはいけない。
-5. 待っている間は顔の計算/画面表示を止めず、最新の数値スナップショットだけを保持する。
-   ACK後は最新値から再開し、待機中の過去FRAMEをまとめて送らない。sequenceは表変更でリセットしない。
+1. Once a settings change is committed, issue a new schema_id and make the schema, numeric type, and indices an immutable snapshot.
+2. Stop UDP FRAME transmission. Discard old-schema FRAMEs/fragments that have not yet been handed to the OS. Packets already sent cannot be recalled.
+3. Cache and send the new schema, then enter `WAIT_SCHEMA_ACK`. Coalesce rapid schema changes to the latest one and keep the once-per-second send limit.
+4. Resume only after receiving an ACK whose session_id, source IP/port, and current schema_id all match.
+   An ACK for old schema 7, future schema 9, a different session, or a different device must not start transmission using schema 8.
+5. While waiting, continue face calculations and display updates, retaining only the latest numeric snapshot.
+   After the ACK, resume with the latest values; do not send a backlog of FRAMEs accumulated during the wait. Do not reset sequence on a schema change.
 
-**待機中にさらに表が変わる場合**
+**Further schema changes during an ACK wait**
 
-表8のACK待ち中に表9が必要なら、表8を破棄して表9だけを待つ。
-表8の遅延ACKは無視する。表9の送信時にも古い値配列を混ぜない。
-同じ未確認期間内の更新・再送・HELLO/PINGは、最初の待機開始からの10秒期限を延ばさない。
-同じIDで違う本文を送らず、IDを使い切ったら新セッションにする。
+If schema 9 becomes necessary while waiting for the ACK for schema 8, supersede schema 8 and wait only for schema 9.
+Ignore a delayed ACK for schema 8. Do not mix old-layout numeric arrays into schema 9 transmission.
+Within the same unacknowledged period, updates, retransmissions, HELLOs, and PINGs must not extend the 10-second deadline measured from the original start of the wait.
+Do not send different payloads with the same ID. Start a new session when schema IDs are exhausted.
 
-**受信側の必須動作**
+**Required receiver behavior**
 
-全断片・開始情報・JSONを検証するまではACKを送らない。検証に失敗した表で現在の表を上書きしない。
-保存した表のインデックス/数値型を更新してからACKする。Pythonのon_schemaコールバックはACK送信より前に完了させる。
-新表が確定したら古い表の未完了FRAMEとキュー内の旧表ACKを破棄し、遅れて届く古いschema_idのFRAMEを読まない。
-新表の組み立て中は、まだ有効な旧表で遅延した旧FRAMEを読むこと自体は許可するが、新表と混ぜない。
-表示を維持する場合は旧表のまま解釈済みの描画状態だけを使い、旧数値配列を新インデックスで読み直さない。
+Do not send an ACK until all fragments, start information, and JSON have been validated. An invalid schema must not overwrite the current one.
+Update the saved schema's indices/numeric type before sending the ACK. Python's `on_schema` callback must finish before the ACK is transmitted.
+Once a new schema is committed, discard incomplete old-schema FRAMEs and queued ACKs for the old schema. Do not interpret delayed FRAMEs carrying an older schema_id.
+While assembling the new schema, it is permissible to interpret delayed old FRAMEs using the still-valid old schema, but never mix the two.
+To keep displaying the last pose, retain only the already-interpreted rendering state from the old schema. Do not reinterpret an old numeric array using new indices.
 
-TCPは同じ変更条件で新SCHEMAを発行するが、ACK待ちはしない。
-同じ接続へ旧データ（送信済み分）→新SCHEMA→新FRAMEの順で書き込む。
+TCP issues a new SCHEMA for the same kinds of changes but does not wait for an ACK.
+Preserve this order on the same connection: old data already sent, then the new SCHEMA, then new FRAMEs.
 
-## 6. 以降に届く — FRAME
+## 6. What arrives afterward — FRAME
 
 ```text
-[共通ヘッダー40 B] [BlendShape値 N個] [head回転3] [head位置3] [rightEye回転3] [leftEye回転3]
-                    i16 / i32           ←────── Float32 × 12 = 48 B ──────→
+[Common header 40 B] [N BlendShape values] [head rotation 3] [head position 3] [rightEye rotation 3] [leftEye rotation 3]
+                        i16 / i32          <------------------ Float32 x 12 = 48 B ------------------>
 ```
 
-FRAME本文はこれだけ。先頭に個数や型を再掲しない。それらは対応表で分かる。
-trackingはヘッダーflags、source_tokenもヘッダー内。FRAME本文には入れない。
+This is the entire FRAME payload. Do not repeat the count or numeric type at the beginning; the schema already provides them.
+Tracking is carried in the header flags, and source_token is also in the header. Neither belongs in the FRAME payload.
 
-例: 表が `[eyeBlinkLeft, eyeBlinkRight, jawOpen, myCustomSmile]`、型i16なら:
+Example: schema `[eyeBlinkLeft, eyeBlinkRight, jawOpen, myCustomSmile]`, encoding i16:
 
 ```text
-名前の順序:  eyeBlinkLeft | eyeBlinkRight | jawOpen | myCustomSmile
-値:              12      |       8      |    45   |      -25
-バイナリ:       0c 00    |     08 00    |   2d 00 |     e7 ff
-                  2 B           2 B         2 B          2 B
+Name order:  eyeBlinkLeft | eyeBlinkRight | jawOpen | myCustomSmile
+Values:          12      |       8       |    45   |      -25
+Binary:         0c 00    |     08 00     |   2d 00 |     e7 ff
+                  2 B           2 B          2 B          2 B
 ```
 
-1単位=既存の整数パーセント。25→正規化0.25、-25→-0.25、150→1.5。0〜100に制限しない。
-i16の範囲を超えたら**送る前に**i32の新しい表を発行する。同じセッション中は自動降格しない。
-i32にも収まらない場合はERROR。無言のclamp/overflowは禁止。
-既存の `Int(weight * 100)` / `blendShapePercent` の丸め結果を共用し、計算の精度や順序を勝手に変えない。
+One unit is one existing integer percentage point: 25 -> normalized 0.25, -25 -> -0.25, 150 -> 1.5. Do not restrict values to 0–100.
+If a value exceeds the i16 range, issue a new i32 schema **before sending it**. Do not automatically downgrade within the same session.
+If it does not fit i32 either, report ERROR. Silent clamping or overflow is forbidden.
+Reuse the existing rounding result from `Int(weight * 100)` / `blendShapePercent`; do not independently change calculation precision or order.
 
-頭・目は既存の軸・倍率・キャリブレーション・ミラー処理後のFloat32。回転はdegree、位置はmeter由来の値。
-アプリ設定適用後なので絶対的な実空間座標ではない。profileの意味を維持し、別の共通軸へ勝手に変換しない。
-headはrx/ry/rz/px/py/pzの6値、右目と左目はそれぞれrx/ry/rz。有限値のみ。
-内部のhead[6...8]等は送らない。NaN/Infや長さ不一致は拒否する。
+Head/eye values are Float32 values after the existing axis, scaling, calibration, and mirroring operations. Rotations are in degrees; positions are meter-derived values.
+Because app settings have already been applied, these are not absolute real-world coordinates. Preserve the meaning of the profile; do not independently convert to another common axis system.
+Head consists of six values, rx/ry/rz/px/py/pz. The right and left eyes each contain rx/ry/rz. All values must be finite.
+Do not transmit internal values such as head[6...8]. Reject NaN/Inf and length mismatches.
 
-顔を見失ったらflags bit0=0。最後の値を残してもよいが追跡中と偽らない。再生中はbit1=1。
-録画にtracking情報がない場合はbit0を現在カメラの追跡状態とし、再生データの有効性と混同しない。
+When tracking is lost, set flags bit0=0. Keeping the last values is allowed, but do not falsely mark them as currently tracked. Set bit1=1 during playback.
+If a recording has no tracking information, derive bit0 from the current camera tracking state; do not confuse it with the validity of the playback data.
 
-sequenceはセッション単位のUInt32。`(new-old) mod 2^32` が1〜2^31-1なら新しい。
-重複・逆順・半周差は採用しない。番号の欠落には送信側の意図的破棄も含まれ、ネットワーク損失と断定しない。
-52項目・i16なら40+104+48=192バイト/FRAME。60fpsで11520バイト/秒。IP等のヘッダー・対応表・制御は別。
+`sequence` is a per-session UInt32. A value is newer if `(new-old) mod 2^32` is in the range 1 through 2^31-1.
+Do not accept duplicates, older/out-of-order values, or a half-range difference. Gaps can include intentional sender-side drops; do not automatically classify them as network loss.
+With 52 fields and i16, a FRAME is 40+104+48=192 bytes. At 60 fps, FRAME messages alone use 11520 bytes/second. IP and other network headers, schemas, and control messages are additional.
 
-## 7. UDP — 対応表を取りこぼしても、推測で読まない
+## 7. UDP — never guess the schema after losing it
 
-**SCHEMAだけはヘッダー込み576バイト以下で分割する。FRAMEは交渉したmax_udp_size以下で分割する。**
-開始情報をまだ読めない段階でもSCHEMAを安全に再構成できるよう、SCHEMA側の分割幅をあらかじめ固定した。
-これによって、開始返答専用のパケットや、先頭断片の到着待ちを増やさずに済む。
+**Fragment SCHEMA into datagrams of at most 576 bytes, including the FMV3 header. Fragment FRAME according to the negotiated max_udp_size.**
+The SCHEMA fragment capacity is fixed in advance so that the receiver can safely reassemble it before reading the start information.
+This avoids needing an extra startup-response packet or waiting for the first fragment before handling others.
 
 ```text
 SCHEMA: capacity = 576 - 40 = 536
@@ -330,229 +336,291 @@ FRAME : capacity = max_udp_size - 40
 part_count = max(1, ceil(total_payload_length / capacity))
 ```
 
-各断片は40バイトヘッダー+本文断片。末尾以外はcapacityバイト、末尾は残り。最大512断片。
-全断片でkind/flags/session_id/schema_id/sequence/source_token/total_payload_length/part_countは同じ。
-part_index順に連結してから本文を読む。途中のFRAMEを描画へ渡さない。
-固定576は経路MTUを保証しない。信頼できるLAN向け。特殊な経路で届かなければTCP等を使う。
+Each fragment consists of a 40-byte header plus a payload fragment. Every fragment except the last contains `capacity` payload bytes; the last contains the remainder. The maximum is 512 fragments.
+All fragments share kind/flags/session_id/schema_id/sequence/source_token/total_payload_length/part_count.
+Concatenate by part_index before interpreting the payload. Do not pass an incomplete FRAME to the renderer.
+The fixed 576-byte limit does not guarantee the path MTU. The protocol targets trusted LANs; use TCP or another suitable transport if a special path does not deliver these datagrams.
 
-受信途中のデータは最大8メッセージ、実断片合計524288バイト。FRAMEは250ms、SCHEMAは3秒で未完了状態を破棄。
-重複は無視、矛盾する断片・メタデータは再構成を破棄。同じ表の同じ本文の再送断片は再利用してよい。
-送信側は同じ表を無制限にキューへ積まない。表の送信処理は1つ、保留再送は最大1回、有限バッチで送る。
-古いモーションを溜めず最新を優先する。大きな項目数のUDPは低fpsまたはTCPを検討する。
+Allow at most 8 in-progress messages and a total of 524288 stored fragment bytes. Discard incomplete FRAME assemblies after 250 ms and incomplete SCHEMA assemblies after 3 seconds.
+Ignore identical duplicates. Discard an assembly if fragments or metadata conflict. Retransmitted fragments of the same schema with the same payload may be reused.
+The sender must not queue an unbounded number of copies of the same schema. Use one active schema-send operation, at most one pending resend, and finite send batches.
+Prioritize the latest motion rather than accumulating old motion. Consider a lower frame rate or TCP for large UDP field counts.
 
-### 7.1 表またはACKが届かなかった場合
+### 7.1 When a schema or ACK does not arrive
 
-| 届かなかったもの | iOS | PC |
+| Missing data | iOS behavior | PC behavior |
 |---|---|---|
-| 初回SCHEMAの全部/一部 | 数値を送らず、1秒間隔で同じ表を再送 | 全体がそろうまでACKしない。同じHELLOを1秒間隔で再送 |
-| 更新SCHEMAの全部/一部 | 数値を止めたまま同じ表を再送 | 古い表で新しい値を推測しない。表の全体がそろってからACK |
-| SCHEMA_ACK | 数値を送らず、1秒間隔で同じ表を再送 | 同じ表の再送を確認したらACKをもう一度送る |
-| FRAME | そのFRAMEは再送しない | 完全に届いた次のFRAMEで復帰する |
+| All or part of the initial SCHEMA | Send no numeric data; retransmit the same schema at 1-second intervals | Do not ACK until complete. Retransmit the same HELLO at 1-second intervals |
+| All or part of an updated SCHEMA | Keep numeric transmission paused and retransmit the same schema | Do not guess new values using the old schema. ACK only after receiving the complete schema |
+| SCHEMA_ACK | Send no numeric data; retransmit the same schema at 1-second intervals | ACK the saved schema again after recognizing its retransmission |
+| FRAME | Do not retransmit that FRAME | Resume using the next completely received FRAME |
 
 ```text
 PC                                              iOS
- |<--- SCHEMA [表7] ----X                        | 表が欠落
- |                                               | FRAMEは送らない
- |<--- SCHEMA [表7] -----------------------------| 1秒後に再送
- |---- SCHEMA_ACK [表7] ----X                    | 今度はACKが欠落
- |                                               | FRAMEはまだ送らない
- |<--- SCHEMA [表7] -----------------------------| さらに1秒後に再送
- |---- SCHEMA_ACK [表7] ------------------------>| 受信確認が届いた
- |<--- FRAME [表7] ------------------------------| 初めて数値を送る
+ |         X---- SCHEMA [id 7] ------------------| Schema lost
+ |                                               | No FRAME yet
+ |<--- SCHEMA [id 7] ----------------------------| Retransmit after 1 second
+ |---- SCHEMA_ACK [id 7] ----X                   | ACK lost this time
+ |                                               | Still no FRAME
+ |<--- SCHEMA [id 7] ----------------------------| Retransmit after another second
+ |---- SCHEMA_ACK [id 7] ----------------------->| Acknowledgement received
+ |<--- FRAME [id 7] -----------------------------| First numeric FRAME
 ```
 
-最初から全体を保持済みの場合、再送断片を保存済みの本文と比較してACKを再送してよい。
-これは「今は全体を保持している」ことの通知であり、初回の部分受信だけでACKしてよいという意味ではない。
-同じIDの本文を再JSON解析する必要はない。ACKは新表の採用直後に1回、その後の再ACKは最大1回/秒。
-ACKに対する追加のACKは送らない。iOSがACKを受けるまで繰り返すことでACK自体の欠落にも対処する。
+If the receiver already holds the complete schema, it may compare a retransmitted fragment with the saved payload and retransmit an ACK.
+This means “I currently hold the complete schema.” It does not permit acknowledging an incomplete first receipt.
+There is no need to parse identical JSON again for the same ID. Send one ACK immediately upon adopting a new schema; limit subsequent re-ACKs to at most once per second.
+Do not acknowledge an ACK. Repeating the schema until iOS receives its ACK handles loss of the ACK itself.
 
-### 7.2 SCHEMA_ACKの正確な中身
+### 7.2 Exact SCHEMA_ACK contents
 
 ```text
-[共通ヘッダー 40 B] [本文なし]
- type=10 / session_id=SCHEMAの通信番号 / schema_id=保存した表番号
+[Common header 40 B] [No payload]
+ type=10 / session_id=the session ID from SCHEMA / schema_id=the stored schema ID
  flags=0 / sequence=0 / source_token=0
  total_payload_length=0 / part_index=0 / part_count=1 / chunk_length=0
 ```
 
-HELLOのnonceをsession_id欄へ入れない。PCが使うのは受諾済みのserver session_id。
-iOSはヘッダーだけでなく送信元endpointも照合する。ACKした番号の表を送信した事実も必要。
-名前一覧やチェックサムをACKに再掲載する必要はない。同じsession_id/schema_idの本文全体は不変であることが前提。
-これは信頼できるLAN上の同期通知であり、送信元の暗号認証ではない。
+Do not put the HELLO nonce in the session_id field. The PC uses the accepted server session_id.
+iOS validates the source endpoint as well as the header. It must also have actually sent the schema with the acknowledged ID.
+Do not repeat the names or a checksum in the ACK. The complete payload associated with a given session_id/schema_id must be immutable.
+This is a synchronization acknowledgement on a trusted LAN, not cryptographic sender authentication.
 
-### 7.3 再送間隔・上限・停止
+### 7.3 Retransmission interval, limits, and stopping
 
-- 初回の表送信と、対応表変更でFRAMEを止めた時点から、UDPの独立したACK待ち期限を開始する。
-  **10秒以内に現在の表のACKが来なければ `ERROR: SCHEMA_ACK_TIMEOUT` を可能なら送り、そのv3セッションを終了する。**
-- 再送は1秒間隔。0秒に初送信できる場合、0,1,...,9秒に最大10回の送信機会があり、10秒で打ち切る。
-  一回の表が複数断片なら、これらは一つの表送信バッチとして数える。バッチを重ねてキューを膨らませない。
-- HELLO/GET_SCHEMA/タイマーは同じUDPのpeer単位1回/秒制限を共有する。更新が重なれば最新表へまとめる。
-  PINGや同じHELLO、同じ/新しい表の再送でACK待ち期限を延長しない。
-- 確認済みの同じ表は10秒程度ごとに再送してもよい。その定期再送だけでACK状態を消したりFRAMEを止めたりしない。
-  重複ACKも表/フレーム番号・状態・利用時間を初期化しない。
-- ACK待ちでもPING/PONGとSTOPを処理する。ACK期限とは別に接続のlease期限と既存の利用時間制限も適用する。
-  先に満了した期限で停止する。
+- Start an independent UDP ACK-wait deadline at the initial schema send, and at the point when FRAME transmission is paused for a schema change.
+  **If the ACK for the current schema does not arrive within 10 seconds, send `ERROR: SCHEMA_ACK_TIMEOUT` if possible and end that v3 session.**
+- Retry at 1-second intervals. If the first send is possible at time 0, there are at most 10 send opportunities at 0,1,...,9 seconds; stop at 10 seconds.
+  Multiple fragments of one schema count as one schema-send batch. Do not overlap batches and let the queue grow.
+- All iOS UDP SCHEMA transmissions triggered by HELLO, GET_SCHEMA, or a timer share one per-peer limit of at most one schema-send batch per second. Coalesce overlapping changes to the latest schema.
+  This limit applies to SCHEMA transmission/retransmission batches, not to all control packets combined. HELLO, GET_SCHEMA, SCHEMA_ACK, and PING retain their respective timing rules.
+  PINGs, identical HELLOs, and retransmission of either the same or a new schema must not extend the ACK-wait deadline.
+- An already-acknowledged schema may optionally be retransmitted about every 10 seconds. That periodic retransmission alone must not clear the acknowledged state or pause FRAME transmission.
+  Duplicate ACKs must not reset schema/frame numbers, state, or usage time either.
+- Process PING/PONG and STOP even while waiting for an ACK. Apply the session lease and existing usage-time limits independently of the ACK deadline.
+  Stop when the earliest applicable deadline expires.
 
-初回に完全な表が届かないPCは、HELLOを最大5回送った後、受信口を維持したままWAITINGへ移る。
-一方、PCが表を持つがACKだけが届かない場合には上の10秒期限でiOSのその送信試行を終了する。PCの受信待機は終了しない。
-ネットワークが復旧しなければ送受信の成功は保証できない。確認できない状態でFRAMEを送るより、安全に終了する。
+A PC that never receives a complete initial schema sends HELLO at most 5 times, then enters WAITING while keeping its receive endpoint open.
+If the PC has the schema but its ACK does not arrive, the 10-second rule above ends that iOS send attempt. The PC does not stop listening.
+Successful communication cannot be guaranteed while the network remains unavailable. Ending an unconfirmed send attempt is safer than transmitting FRAMEs without confirmation.
 
-### 7.4 未知の表・遅延したデータを受けたとき
+### 7.4 Unknown schemas and delayed data
 
-確認待ち方式でも防御として、未知のschema_idのFRAMEは破棄し、GET_SCHEMAを最大1回/秒送る。
-GET_SCHEMAはACKの代わりにならない。初回はsession_idが未確定なのでGET_SCHEMAでなく同じHELLOを再送する。
-要求IDの表を保持していなければiOSは最新表を返す。古い表・古いACKで新しい表を巻き戻さない。
+Even with the acknowledgement mechanism, defensively discard FRAMEs carrying an unknown schema_id and send GET_SCHEMA at most once per second.
+GET_SCHEMA is not a substitute for an ACK. Before the initial session_id is established, retransmit the same HELLO instead of GET_SCHEMA.
+If iOS no longer holds the requested schema ID, return the latest schema. An old schema or ACK must not roll back the current schema.
 
-## 8. TCP — 1本の接続で、表の次に数値を流す
+## 8. TCP — one connection, with numeric data following the schema
 
-PCがiOSの直接TCP待受（iFacialMocap:49984 / Facemotion3d:49994）に接続してHELLOを送る。iOSはSCHEMAをキューへ入れ、その後にFRAMEを入れる。
-**TCPだけは**SCHEMA_ACKを待つ状態を設けない。表の定期再送は不要。
-TCP自体の再送/順序制御に任せ、受信プログラムは完全なSCHEMAの保存を終えてから後続FRAMEを解析する。
-正常な開始時にPCからGET_SCHEMAを追加送信する必要もない。
+The PC connects to the iOS direct-TCP listener, iFacialMocap:49984 or Facemotion3d:49994, and sends HELLO. iOS queues SCHEMA first, then FRAME.
+**For TCP only**, do not enter a state waiting for SCHEMA_ACK. Periodic schema retransmission is unnecessary.
+Leave transport-level retransmission and ordering to TCP. The receiver must finish storing the complete SCHEMA before decoding subsequent FRAMEs.
+The PC does not need to send an additional GET_SCHEMA during normal startup.
 
-TCPのrecv/receive 1回を1メッセージとみなさない。
-40バイトがそろったらヘッダー検証→chunk_length分の本文がそろったら取り出す→余りを次へ残す。
-TCPのpart_index=0、part_count=1、chunk_length=total_payload_length。
-追加の4バイト長、旧TCP終端文字列、SCHEMA分割パケットは付けない。
+Do not treat one TCP recv/receive call as one message.
+Once 40 bytes are available, validate the header. Once `chunk_length` payload bytes are also available, extract the message and retain any remaining bytes for the next message.
+On TCP, part_index=0, part_count=1, and chunk_length=total_payload_length.
+Do not add an extra 4-byte length prefix, a legacy TCP terminator string, or application-level SCHEMA fragmentation packets.
 
-1接続のserial queueで書き込み順を守り、未送信モーションは最新1件へ置換する。
-送信途中のメッセージを切り詰めず、必要な表と依存するFRAMEの順序を保つ。
-同時書き込み数と受信バッファに上限を設け、停止したネットワークを無限に待たない。
-未完了HELLO接続は5秒以内に閉じる。切断時の不完全メッセージは破棄。
+Use one serial write queue per connection to preserve order; replace not-yet-sent motion with the latest single frame.
+Do not truncate a message already being sent. Preserve the ordering between a required schema and the FRAMEs that depend on it.
+Bound the number of concurrent writes and the receive buffer. Do not wait indefinitely on a stalled network operation.
+For normal PC-initiated TCP startup, iOS must close a connection if it does not receive a complete HELLO within 5 seconds of accepting that connection. Discard incomplete messages on disconnect. The PC's separate deadline for receiving the initial SCHEMA is specified in Section 9.3.
 
-## 9. 数値専用の監視・有限の復旧・無期限待機
+## 9. FRAME-specific monitoring, bounded recovery, and indefinite waiting
 
-### 9.1 2つの時刻を分ける
+### 9.1 Keep two separate timestamps
 
-- `last_valid_receive`：通信として正しいSCHEMA/PONG/FRAMEを受けた時刻。
-- `last_frame_at`：**現在の表で検証・復元できた新しいFRAMEだけ**の時刻。
+- `last_valid_receive`: the time a protocol-valid SCHEMA, PONG, or FRAME was received.
+- `last_frame_at`: the time **a new FRAME was successfully validated and decoded using the current schema**.
 
-PONG、対応表、ACKの再送、途中の断片、壊れたFRAME、重複/逆順FRAMEはlast_frame_atを更新しない。
-tracking=falseでも完全なFRAMEなら更新する。顔が見えていないだけで通信断とみなさない。
+PONGs, schemas, ACK retransmissions, partial fragments, malformed FRAMEs, and duplicate/out-of-order FRAMEs do not update last_frame_at.
+A complete FRAME with tracking=false does update it. A face being out of view is not itself a network disconnection.
 
-### 9.2 PC側の標準タイマー
+### 9.2 Default PC timers
 
-| 段階 | 動作 |
+| Stage | Behavior |
 |---|---|
-| 通常UDP開始 | HELLOを直ちに1回、その後1秒間隔。合計最大5回 |
-| 通常TCP開始 | 接続試行を合計最大5回。各接続のタイムアウトは標準3秒、試行間隔は最低1秒 |
-| 初回の対応表が確定 | on_schemaで読み取り位置を更新、UDPはACK。その後最初のFRAMEを監視 |
-| 最初のFRAMEなし / FRAME受信が途絶える | 基準時刻から3秒で復旧試行を開始 |
-| 復旧試行 | 1秒間隔・最大3回。UDPは保存済み表のACK再送とGET_SCHEMA(最新=0)。TCPはGET_SCHEMAだけ |
-| 基準時刻から12秒でFRAMEなし | WAITING。受信口を閉じず、タイマー起因のHELLO/ACK/GET_SCHEMA/PING/自動再接続を止める |
-| 正しい受信がlease期間一切ない / iOSのERROR | 12秒より早くWAITINGへ移ってよい。プログラムは終了しない |
-| WAITING中に正しい対応表が届く | 検証/保存/on_schemaのあとUDPのACKを返す。古いFRAMEは再送要求しない |
-| WAITING中に完全な新しいFRAMEが届く | STREAMINGへ戻る。次に止まった場合の監視と3回の復旧回数を初期化する |
+| Normal UDP startup | Send HELLO immediately, then at 1-second intervals, at most 5 sends total |
+| Normal TCP startup | At most 5 connection attempts. Default connect timeout: 3 seconds per attempt; minimum attempt interval: 1 second |
+| Initial schema committed | Update field indices in on_schema; ACK on UDP. Then monitor for the first FRAME |
+| No first FRAME / FRAME reception stops | Start recovery attempts 3 seconds after the reference timestamp |
+| Recovery attempts | At 1-second intervals, at most 3 attempts. UDP retransmits the saved schema's ACK and GET_SCHEMA(latest=0). TCP sends only GET_SCHEMA |
+| No FRAME 12 seconds after the reference timestamp | Enter WAITING. Keep the receive endpoint open; stop timer-driven HELLO, ACK, GET_SCHEMA, PING, and automatic reconnection |
+| No valid traffic at all for the lease period / an iOS ERROR | May enter WAITING earlier than 12 seconds. Do not terminate the program |
+| Valid schema arrives while WAITING | Validate/store it and complete on_schema, then ACK on UDP. Do not request old FRAME retransmission |
+| Complete new FRAME arrives while WAITING | Return to STREAMING. Reset monitoring and the three-attempt recovery budget for a subsequent interruption |
 
-初回の基準は表が保存された時刻。以後は最後の有効FRAME時刻。
-受信直後の初回ACKは復旧3回に含めない。表再送に応じるACKは受動的な返信であり、最大1回/秒の別規則。
-タイマー・表の再送が同じ秒に重なればACKはまとめてよい。復旧3回は送信試行の上限で、ネットワーク到達の保証ではない。
+FRAME-based resumption in the table requires a schema validated for the current UDP session or the same still-open TCP connection. It does not permit a newly established TCP connection to skip its initial SCHEMA; see Section 9.3.
 
-12秒はiOSの独立した10秒ACK待ちより余裕を持たせた既定値。SCHEMA更新のACK待ちを、ただちに切断とみなさない。
-同じ未受信期間中は、新しいschema_idやPONGが届いてもこのFRAME期限・復旧回数を再開始しない。
-新しい表を採用した場合、以後の再ACKの対象はその新しい表だけにする。古い表のACKをキューに残さない。
-一度WAITINGになった後は、同じ/新しい表を受けてもタイマー復旧を無限に開始し直さない。ACK返信は続け、FRAMEで初めて通常監視へ戻る。
-起動直後の--listenはまだ復旧を使い切っていないので、最初の手動SCHEMA後は初回FRAME監視を開始する。
+The initial reference timestamp is when the schema was stored. Afterward, it is the time of the last valid FRAME.
+The initial ACK immediately after receipt is not one of the three recovery attempts. ACKs responding to schema retransmission are passive responses, separately limited to at most once per second.
+If a timer and a schema retransmission occur in the same second, their ACKs may be coalesced. The three attempts limit transmission attempts, not guarantee delivery.
 
-### 9.3 待機中の受信口は閉じない
+The default 12-second limit leaves room beyond iOS's independent 10-second ACK wait. Do not immediately treat an ACK wait for a schema update as a disconnection.
+Within one period without valid FRAMEs, receiving a new schema_id or PONG must not restart the FRAME deadline or recovery counter.
+After adopting a new schema, re-ACK only that schema. Do not leave ACKs for old schemas queued.
+Once WAITING has been entered, receiving the same or a new schema must not restart timer-based recovery indefinitely. Continue replying with ACKs; only a FRAME restores normal monitoring.
+A freshly started `--listen` receiver has not yet exhausted recovery, so its first manual SCHEMA starts initial-FRAME monitoring.
 
-**UDP:** bind済みの同じソケットでrecvfromを続ける。UDP connectによる固定peerフィルタは使わず、IP/sessionをアプリ側で検証する。
-待機移行のためにSTOPを送らない。ポートを作り直したり自動割当てへ変えたりしない。
-正しい同一sessionの遅れて届いたFRAMEは、その表・sequenceで検証できれば再開に使える。
+### 9.3 Keep the receive endpoint open while waiting
 
-**TCP:** 生きている既存接続は受信を続ける。切断/壊れたストリームはその接続だけを閉じ、PCのTCP listenerは維持する。
-iOSが後からPC:49986へ接続し、最初にSCHEMAを送る手動モードを受け付ける。
-受信待機中の接続要求は受けられるが、接続できただけでSTREAMINGにしない。
-初回の完全なSCHEMAを5秒で受け取れない新接続は閉じ、listenerへ戻る。並列の無制限接続は受け入れない。
+**UDP:** Continue recvfrom on the same bound socket. Do not use UDP connect to filter to one fixed peer; validate IP/session in the application.
+Do not send STOP merely to enter waiting. Do not recreate the port or change it to an automatically assigned port.
+A delayed valid FRAME from the same session may resume streaming if its schema and sequence can be validated.
 
-受信プログラムが終了するのは明示停止、Ctrl+C、任意のduration満了、bind失敗、コールバック失敗等。
-PCのスリープ・OSによる終了・NIC消失・ファイアウォール遮断まで復旧を保証するものではない。
-同梱Pythonは--no-reconnectオプションを受け付ける。その有無にかかわらず無限に自動再接続せず、受信待機を維持する。
+**TCP:** Keep reading an existing connection that is still alive. On disconnection or a malformed stream, close only that connection and retain the PC TCP listener.
+Accept manual mode in which iOS later connects to PC:49986 and sends SCHEMA first.
+Incoming connections may be accepted while waiting, but a successful connection alone does not mean STREAMING.
+Close a new connection if a complete initial SCHEMA is not received within 5 seconds, and return to the listener. Do not accept an unlimited number of parallel connections.
 
-### 9.4 iOSからの手動開始（PCのHELLO不要）
+**A new TCP connection must establish its own schema context, even when the remote IP address and port are identical to those of a previous connection.** Track initial-SCHEMA receipt for each connection instance, rather than inferring it from a retained peer/session pair. Start the 5-second initial-SCHEMA deadline when that connection is established (when the PC accepts an incoming manual connection). A previously adopted session or incoming partial data must not bypass or restart that deadline.
+
+Until a complete initial SCHEMA has been received and validated on that connection, and `on_schema` has completed successfully, do not decode or forward its FRAMEs and do not enter STREAMING. A matching old session_id/schema_id pair and an otherwise newer sequence are not sufficient. On disconnection, discard incomplete stream bytes and invalidate the disconnected connection's authority to validate FRAMEs on a future connection. Previously decoded rendering state and retired-session rejection history may be retained; neither substitutes for a new connection's initial SCHEMA. Manual startup still requires the new session_id specified in Section 9.4.
+
+This does not change UDP waiting or resumption on a TCP connection that never disconnected. After any required initial-schema validation, keep the bounded recovery and receive-only waiting rules in Section 9.2; do not introduce unlimited automatic retries.
+
+The receiver exits for explicit stop, Ctrl+C, an optional duration expiring, bind failure, callback failure, or similar reasons.
+This does not guarantee recovery from PC sleep, OS termination, a disappearing network interface, or firewall blocking.
+The supplied Python accepts `--no-reconnect`. With or without that option, it does not reconnect automatically forever; it retains receive waiting.
+
+### 9.4 Manual startup from iOS — no PC HELLO needed
 
 ```text
-PC:UDP49983 / TCP49986             iOS（手動でPCのIP/portを入力）
-   |                                  |
-   |  待機中。HELLOを出していなくてよい |
-   |<---- SCHEMA（client_nonce=0）-----| 新session_id / schema_id=1
-   |      全断片を検証・保存           |
-   |----- SCHEMA_ACK ---------------->| UDPだけ。server session_idを返す
-   |<---- FRAME ----------------------| UDPはACK後、TCPはSCHEMAの後
-   |<---- FRAME ----------------------|
+PC: UDP49983 / TCP49986                    iOS (user enters PC IP/port)
+   |                                       |
+   | Waiting; no prior HELLO is required    |
+   |<---- SCHEMA (client_nonce=0) ----------| New session_id / schema_id=1
+   |      Validate/store all fragments     |
+   |----- SCHEMA_ACK --------------------->| UDP only; use the server session_id
+   |<---- FRAME ---------------------------| UDP: after ACK; TCP: after SCHEMA
+   |<---- FRAME ---------------------------|
 ```
 
-手動送信での差はSCHEMA先頭20バイトのclient_nonce=0だけ。共通ヘッダーのsession_id=0は禁止のまま。
-actual_fps=1..60、max_udp_size=576..1200、lease_ms=10000標準、contract_revision=4をiOSが指定する。
-PCは自身の許容FPS/UDP上限を超えた手動SCHEMAを拒否する。既定は60fps/1200バイト。
-初回と途中変更に同じSCHEMA形式を使い、client_nonce=0はセッション中不変。
-既存のnonce不一致チェックを全般的に取り払ってはいけない。手動0だけを明示的な例外にする。
+The manual-start marker is client_nonce=0 in the first 20 bytes of SCHEMA. The common header's session_id must still be nonzero.
+iOS specifies actual_fps=1..60, max_udp_size=576..1200, lease_ms=10000 by default, and contract_revision=4.
+The PC rejects a manual SCHEMA exceeding its permitted FPS/UDP limits; the defaults are 60 fps and 1200 bytes.
+Use the same SCHEMA format at startup and on subsequent changes. client_nonce=0 remains unchanged for the session.
+Do not generally remove nonce-mismatch validation. Explicitly allow only the manual-start value 0 as the exception.
 
-UDP: iOSはPCの指定ポートへSCHEMAを送り、その送信に使った同じiOS側ソケットでACKを待つ。
-TCP: iOSがPCのTCP listenerへ接続し、その接続へSCHEMA→FRAMEを書き込む。PCからHELLOを待たない。
-どちらも手動開始ボタンを押すたび新session_idを使う。動作中の他のクライアントや旧転送を横取りしない。
+UDP: iOS sends SCHEMA to the specified PC port and waits for ACK on the same iOS socket used to send it.
+TCP: iOS connects to the PC TCP listener and writes SCHEMA followed by FRAME on that connection. Do not wait for HELLO from the PC.
+For either transport, use a new session_id each time the manual-start button is pressed. Do not take over another running client or a legacy transfer.
 
-iOSは手動でも課金・時間制限・前面条件を確認する。通常開始と同じUDPの10秒ACK待ち・再送・停止規則を使う。
-ACKが10秒届かなければその試行を終了し、UIに確認できなかった旨を表示する。PCの待機は残るので、ユーザーはiOSから再度手動開始できる。
-再送、PCの再ACK、GET_SCHEMAを、課金/試用の開始時刻やフレーム番号を初期化する理由にしない。
+iOS checks purchase status, time limits, and foreground requirements for manual startup as well. Use the same UDP 10-second ACK wait, retransmission, and stopping rules as for normal startup.
+If no ACK arrives within 10 seconds, end that attempt and show in the UI that receipt could not be confirmed. The PC remains listening, so the user can start manually again from iOS.
+Retransmission, PC re-ACKs, and GET_SCHEMA must not reset purchase/trial start times or frame numbers.
 
-### 9.5 セッション維持と停止
+### 9.5 Keeping a session alive and stopping
 
-数値待ち/復旧中/配信中はPCが3秒ごとにPING、iOSは同じsequenceのPONGを返す。WAITINGではPCの定期PINGを止める。
-PING/PONGはFRAME監視・iOSの10秒ACK期限を延長しない。iOSは正しいPC制御がlease期間来なければそのセッションを失効させる。
-PCの待機移行時はSTOPを送らないため、古いiOSセッションはleaseで終了してよい。PCの受信口はそのまま残る。
+While waiting for numeric data, recovering, or streaming, the PC sends PING every 3 seconds. iOS replies with PONG carrying the same sequence. The PC stops periodic PINGs in WAITING.
+PING/PONG does not extend FRAME monitoring or iOS's 10-second ACK deadline. iOS expires the session if no valid PC control message arrives for the lease period.
+The PC does not send STOP when entering waiting, so an old iOS session may end by lease expiry. The PC receive endpoint stays open.
 
-HELLO以外のPC制御は受信・採用済みserver session_idを使う。iOSはsession_idと送信元endpoint/TCP接続を照合する。
-ERRORは理由を表示してWAITINGへ移る。未受諾のERRORはHELLOのnonce、受諾後はserver session_id。
-STOPはPCを明示終了するとき、またはiOS側の停止ボタン等のために使う。再試行を使い切っただけでは送らない。
-iOSのライフサイクル、購入・体験版・権限喪失による停止も従来どおり。v3を制限の回避口にしない。
-既存sendPort/sendProtocolの保存設定へv3の一時的な接続情報を上書きしない。
+Every PC control except HELLO uses the received and adopted server session_id. iOS validates that session_id and the source endpoint/TCP connection.
+For a valid ERROR belonging to the current session or a matching, still-pending HELLO, display the reason and enter WAITING. An ERROR rejecting a pending HELLO uses that HELLO's client_nonce in the header's session_id field; an ERROR for an accepted session uses the iOS-generated session_id.
+Apply a HELLO-rejection ERROR only to the matching, still-pending HELLO from the expected endpoint/TCP connection. Once a server session has been adopted, ignore delayed ERRORs for that earlier HELLO. Validate the ERROR payload as UTF-8 and apply the existing sender/session checks before treating it as a current-session error. Handle malformed messages according to Section 10: discard invalid UDP data; close the affected TCP connection for invalid TCP data.
+STOP is for explicit PC termination; stopping can also be initiated by actions such as the iOS Stop button. Do not send STOP merely because retries have been exhausted.
+Preserve existing stopping behavior for iOS lifecycle changes, purchase/trial limits, or lost permissions. v3 must not bypass these restrictions.
+Do not overwrite existing saved sendPort/sendProtocol settings with temporary v3 connection information.
 
-## 10. ScrapingValue と検証上限
+## 10. ScrapingValue and validation limits
 
-ScrapingValueは疑似BlendShapeではなく**FRAMEヘッダーのsource_tokenだけ**に入れる。
-初期SCHEMAには入れない。表は不変に保ち、トークン更新は次のFRAMEから反映できる。
-既存WEBのHTMLや値の取得方法は変えず、取得値が初期化/更新されたときだけ変換する。
+ScrapingValue is not a pseudo-BlendShape. Place it **only in the FRAME header's source_token**.
+Do not include it in the initial SCHEMA. Keep the schema immutable; token updates can take effect in the next FRAME.
+Do not change the existing web HTML or the way its value is obtained. Convert the fetched value only when it is initialized or updated.
 
-1. 両端のASCII SP/TAB/CR/LFだけを除く。
-2. 空または厳密に小文字`none`なら0。
-3. それ以外のUTF-8にFNV-1a-32。初期値2166136261。各byteで `h=((h XOR byte)*16777619) mod 2^32`。
-4. 結果0だけ1に置き換える。
+1. Trim only ASCII SP/TAB/CR/LF from both ends.
+2. If empty or exactly lowercase `none`, use 0.
+3. Otherwise, apply FNV-1a-32 to the UTF-8 bytes. Start at 2166136261. For each byte, calculate `h=((h XOR byte)*16777619) mod 2^32`.
+4. Replace only a final hash value of 0 with 1.
 
-毎フレームのWEBアクセス・ハッシュは禁止。Swift hashValueは不可。取得成功キャッシュ等の既存動作を維持。
-0でもデータ受信は可能。これは認証・暗号化・偽装防止ではない。信頼できるLAN/VPNで使い、ポートをインターネット公開しない。
+Do not perform web access or hashing on every frame. Swift hashValue is not allowed. Preserve existing behavior such as caching successfully fetched values.
+A token of 0 does not prevent data reception. This mechanism is not authentication, encryption, or protection against spoofing. Use a trusted LAN/VPN and do not expose the ports to the Internet.
 
-本文上限: SCHEMA262144、FRAME16432（4096×4+48）、ERROR512、HELLO8、その他の制御0。
-未知type/flags/header_size、宣言長超過、数値型と長さ不一致は拒否する。
-UDPは破棄、TCPは接続を閉じる。壊れたTCPストリーム内でmagicを検索して推測で再同期しない。
-コールバック例外は通信障害に化けさせず、元の原因を保持して終了する。
+Payload limits: SCHEMA262144, FRAME16432 (4096x4+48), ERROR512, HELLO8, and 0 for all other controls.
+Reject unknown type/flags/header_size, oversized declared lengths, and mismatches between numeric type and payload length.
+Discard invalid UDP data; close the connection for invalid TCP data. Do not search a corrupted TCP stream for the magic bytes to guess a resynchronization point.
+A callback exception must terminate processing with its original cause preserved, rather than being disguised as a network failure.
 
-## 11. 実装完了の判定
+## 11. Implementation acceptance criteria
 
-以下は必須テスト:
+The following tests are required:
 
-- PONGだけが35秒以上続いても、FRAME専用監視が最大3回復旧後にWAITINGへ移る。
-- ACK後にFRAMEが0件、配信中のFRAME停止、新表確認中、SCHEMAだけの継続で無限リトライしない。
-- WAITINGでUDPポートが変わらず、タイマーからSTOP/HELLO/PINGを送らない。
-- 後から同じ表・新しい手動sessionのSCHEMAが来たらACKし、FRAMEで復帰する。
-- --listen起動でHELLOなしのUDP手動開始、TCP手動接続が成功する。
-- TCPが切れてもPCのlistenerは残り、再度iOSから接続できる。
-- 不完全表ではACKしない。違うIP/nonce、旧session、稼働中の乗っ取りは拒否する。
+- Even if only PONGs continue for more than 35 seconds, FRAME-specific monitoring enters WAITING after at most three recovery attempts.
+- Do not retry indefinitely when no FRAME follows an ACK, FRAMEs stop during streaming, a new schema is awaiting confirmation, or only SCHEMA messages continue.
+- In WAITING, the UDP port remains unchanged and timers send no STOP/HELLO/PING.
+- ACK a subsequently received identical schema or a SCHEMA for a new manual session; resume on FRAME.
+- A receiver started with `--listen` supports manual UDP startup and manual TCP connections without HELLO.
+- After TCP disconnection, the PC listener remains open and iOS can connect again.
+- Reconnect using the same source IP/port as a previously established TCP connection: the new connection must still enforce the 5-second initial-SCHEMA deadline. Without a complete initial SCHEMA, it must close while the PC listener stays open.
+- On that new TCP connection, an old-session FRAME with a newer sequence, sent before the new connection's initial SCHEMA, must not reach the renderer or restore STREAMING. Verify separately that a valid new manual SCHEMA/session followed by FRAME can start reception.
+- A matching, valid ERROR for a still-pending HELLO is handled, but a delayed ERROR for that earlier HELLO must not change an already-adopted session's state.
+- Do not ACK an incomplete schema. Reject the wrong IP/nonce, retired sessions, and takeover of a running stream.
 
-- UDPはHELLOだけではSCHEMAの再送のみ。正しいACKの前にはFRAMEを1個も送らない。
-- SCHEMAの全部/一部が欠落したときと、最初のACKだけが欠落したときの両方で再送→確認→配信へ復帰する。
-- 表変更時は一時停止する。古い番号/違うsession/別peerのACKでは再開せず、新番号の正しいACKで最新値から再開する。
-- 追加・削除・並び替え・i16→i32、ACK待ち中の再変更、重複SCHEMA/ACK、過去のFRAMEの到着を検証する。
-- 10秒のACK期限はPINGやHELLO再送、連続設定変更でも延長されず、安全に終了する。
-- TCPはHELLOだけでSCHEMA→FRAME。同じ接続のアプリ層ACKは必要ない。
-- on_schemaコールバックが失敗したらACKを送らず終了する。contract_revisionが4でないv3接続は拒否する。
+- On UDP, HELLO alone results only in SCHEMA transmission/retransmission. Do not send even one FRAME before a valid ACK.
+- Recover through retransmission -> acknowledgement -> streaming both when all/part of SCHEMA is lost and when only the initial ACK is lost.
+- Pause on a schema change. Do not resume for an old ID, wrong session, or different peer's ACK. Resume with the latest values only after the new ID's valid ACK.
+- Test additions, removals, reordering, i16 -> i32, further changes during an ACK wait, duplicate SCHEMA/ACK, and arrival of old FRAMEs.
+- PINGs, HELLO retransmission, and continuous settings changes must not extend the 10-second ACK deadline; end safely.
+- On TCP, HELLO alone leads to SCHEMA -> FRAME. No application-layer ACK on that connection is needed.
+- If on_schema fails, send no ACK and terminate. Reject v3 connections whose contract_revision is not 4.
 
-加えて負値・100超・Unicode・型の境界・頭/目の倍率・ミラー・再生・顔喪失・停止/再接続・購入制限・旧v1/v2回帰を確認する。
-上記は保守・実装時の確認項目であり、この配布には自動テスト一式を含めない。`golden_vectors.json` はバイト列の照合用。iPhoneなしの基本通信確認は `README_JA.md` の2ターミナル手順を使う。
-iOSでの実装完了にはXcodeビルドと両アプリの実機UDP/TCP相互接続も必要。未実施の確認を成功扱いにしない。
+Also verify negative values, values above 100, Unicode, numeric boundaries, head/eye scaling, mirroring, playback, tracking loss, stop/reconnect, purchase restrictions, and legacy v1/v2 regressions.
+These are implementation/maintenance checks; this distribution does not contain the full automated test suite. `golden_vectors.json` is for byte-level comparison. For a basic exchange without an iPhone, follow the two-terminal procedure in `README.md`.
+Completion of the iOS implementation also requires an Xcode build and real-device UDP/TCP interoperability tests for both apps. Do not report unperformed checks as successful.
 
-一般的な設計根拠（FMV3自体は本パッケージ固有仕様）:
+General design references (FMV3 itself is specific to this package):
 - Python struct: https://docs.python.org/3/library/struct.html
 - Python Socket HOWTO: https://docs.python.org/3/howto/sockets.html
 - UDP Usage Guidelines / RFC 8085: https://www.rfc-editor.org/rfc/rfc8085.html
 - Transmission Control Protocol / RFC 9293: https://www.rfc-editor.org/rfc/rfc9293.html
+
+## Appendix A. Verification notes for the supplied code snapshot
+
+**This appendix is non-normative and is included in both language editions.** It records observations from the 2026-09-22 comparison and recheck of the supplied Python files and English diagrams. These are known implementation differences, not alternative protocol rules. This documentation revision does not modify or fix the Python code or diagrams.
+
+The code observations below apply to the reviewed snapshot, identified by SHA-256; they are not a claim about later GitHub revisions or the production iOS implementation.
+
+| Reviewed file | SHA-256 |
+|---|---|
+| `face_motion_v3.py` | `d68b145ddf7307f79146cf2d1b93f691246c215a329e89593d73c766dfd0f432` |
+| `simulate_ios_v3.py` | `b4d73d14b532470820eace853c5347d059c3a6698bd3e23e40c959dff45ce9f4` |
+
+### A.1 Reading the source and the reference code
+
+The wire header calls the fields `message_type` and `total_payload_length`; the reference `Packet` object exposes them as `kind` and `total_length`. These are API naming differences, not different header layouts. `chunk_length` is the byte length of `Packet.payload` for an individual packet.
+
+The startup/ACK diagrams in the opening overview describe UDP. TCP does not send an application-layer SCHEMA_ACK; TCP's own transport-level acknowledgements/retransmissions still apply. “No FRAME retransmission” in this specification means no additional application-level retransmission of old motion frames.
+
+The transmit diagram's shorthand “HELLO only: PC client_nonce” describes PC-to-iOS messages only. For the common header across both directions, an iOS-to-PC ERROR rejecting a pending HELLO also uses client_nonce, as clarified in Sections 2 and 9.5. This requires no header size or offset change.
+
+The repository README additionally states that iFacialMocapTr uses the iFacialMocap defaults and that Facemotion3d requires its **Other** license. These are app integration conditions, not extra JSON keys. Do not change the supported app/profile pairs in Section 5.3.
+
+### A.2 One existing receiver validation difference
+
+Section 3 defines ERROR payloads as UTF-8. In the supplied `face_motion_v3.py`, the pending-HELLO ERROR branch in `V3Client._handle()` uses `decode('utf-8', 'replace')`. Thus, before a server session has been adopted, an otherwise matching ERROR containing invalid UTF-8 is displayed with replacement characters and moves the receiver to WAITING rather than being rejected as malformed. The established-session ERROR path in `ReceiverCore.accept()` does reject invalid UTF-8.
+
+This was reproduced with an ERROR payload of byte `FF`. It is an existing difference in malformed-input handling, not a translation change. Send valid UTF-8 as required by Section 3; do not copy the permissive branch as a new protocol rule. The already-fixed handling of delayed ERRORs for a previous HELLO was separately regression-tested.
+
+### A.3 The synthetic sender is not a complete production iOS implementation
+
+Two concrete differences were confirmed in `simulate_ios_v3.py`:
+
+- Its FRAME loop recomputes `source_token("hapihapi")` for each generated frame. Section 10 requires a production sender to cache this result and recompute only when the source value changes. The resulting transmitted token is the same, but the simulator is not demonstrating that performance optimization.
+- Its TCP accept loop does not enforce the 5-second incomplete-HELLO deadline specified in Section 8. A connection with no HELLO was still open after more than 5 seconds and accepted a later HELLO. Production iOS code must implement the specified deadline.
+
+These differences do not alter the byte layout of valid packets or the normal startup order. They do mean that a successful simulator exchange is not proof that all production-sender requirements have been implemented. iOS lifecycle, purchase restrictions, and real-device networking must be verified separately.
+
+### A.4 Existing receiver difference on TCP reconnection
+
+The 2026-09-22 recheck reproduced an additional issue in `face_motion_v3.py`: after an established manual TCP connection had received SCHEMA and FRAME and then disconnected, a new connection reusing the same source IP address and port could be treated as belonging to the retained old session.
+
+- Without sending an initial SCHEMA on the new connection, the test connection remained open for about 5.55 seconds and accepted a later SCHEMA, contrary to Section 9.3's 5-second initial-SCHEMA deadline.
+- In a separate test, an old-session FRAME carrying the previous session_id/schema_id and a newer sequence was accepted on the new connection before any SCHEMA had been received there, returning the receiver to STREAMING.
+
+The socket and TCP framing buffer were replaced, but the previous `core.session_id` and `_peer` remained. The deadline and current-session checks relied on those retained values without sufficiently distinguishing the new connection instance. The recheck forced source-port reuse on Linux; it did not establish the occurrence rate in normal use or the impact on production iOS builds.
+
+This is a receiver implementation defect, not permission to resume an old session on an unvalidated new TCP connection. Implement connection-scoped initial-SCHEMA validation and the deadline in Section 9.3. Do not weaken the specification to reproduce this behavior. This documentation update alone does not fix the defect.
+
+This issue concerns the **PC receiver waiting for SCHEMA on a new connection**. It is separate from the synthetic sender's **incomplete-HELLO deadline** described in A.3. It also does not prohibit resumption on the same TCP connection that has remained open.
