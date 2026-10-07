@@ -1,164 +1,142 @@
-# Face Motion v3 — two-file sample
+# Face Motion v3 — receiver sample (UDP / TCP)
 
-Receive BlendShape values and head/eye poses from **iFacialMocap**, **iFacialMocapTr**, or **Facemotion3d**, over UDP or TCP.
+Receive BlendShape values and head/eye poses from **iFacialMocap**, **iFacialMocapTr** or **Facemotion3d**.
 
-[日本語の説明](README_JA.md) · [MIT License](LICENSE)
+[日本語](README_JA.md) · [Specification](PROTOCOL_V3.md) · [Changes](CHANGELOG.md) · [MIT License](LICENSE)
 
-## 1. Connect and receive — start here
+Pictures: [connection flows](diagrams/fmv3_flow.svg) · [message layout](diagrams/fmv3_messages.svg)
 
-**Python 3.10+; no `pip install` required.** For a real iPhone/iPad, only **`face_motion_v3.py`** is needed. Open a terminal in its folder; do **not** start the simulator. Use `python3` instead of `python` on macOS if needed.
+Python 3.10 or later, no `pip install`. For a real iPhone/iPad you only need **`face_motion_v3.py`**. On macOS, type `python3` instead of `python` if needed.
 
-Replace `PHONE_IP` with the iPhone/iPad's LAN address. **Run one of these commands, not both:**
+## 1. Receive over UDP (recommended)
+
+Replace `PHONE_IP` with the iPhone/iPad's address on your LAN:
 
 ```sh
-# UDP
-python face_motion_v3.py --host PHONE_IP --transport udp
+python face_motion_v3.py --host PHONE_IP
+```
 
-# OR: TCP
+iFacialMocapTr and **Facemotion3d** use the same command. Facemotion3d needs its **"Other" or "Unity" license** (with neither, sending stops after about 10 seconds). With either license, v3 sends the "Other" output (the iFacialMocap-compatible output), so it uses iFacialMocap's ports and no extra option is needed.
+
+It works when `State=STREAMING` appears and `frames=` keeps increasing. All values of one frame are printed on one line about once per second; every frame is still received. `--log-every 0` turns the printing off. Stop with **Ctrl+C**.
+
+## 2. Receive over TCP
+
+```sh
 python face_motion_v3.py --host PHONE_IP --transport tcp
 ```
 
-**iFacialMocapTr uses the same commands. For Facemotion3d, the “Other” license is required; add `--app facemotion3d`.** Other Facemotion3d license types do not enable communication with this sample.
+TCP works the same way. Use it when UDP is blocked on your network.
 
-The receiver sends HELLO and handles the UDP schema ACK automatically. Normal TCP needs no application-layer schema ACK.
+## 3. Start from the iOS app (manual start)
 
-**Success:** `State=STREAMING` appears and `frames=` increases. One frame's **complete** values are shown on one line about once per second; every valid new frame is processed. The terminal may visually wrap the line. Stop with **Ctrl+C**. `--log-every 0` disables frame logs, not reception.
+Start the receiver (PC) first. It waits and sends nothing:
 
-### Supported app versions
+```sh
+python face_motion_v3.py --listen                    # UDP, this PC's port 49983
+python face_motion_v3.py --listen --transport tcp    # TCP, this PC's port 49984
+```
 
-| App | Minimum supported version |
+Then enter this PC's LAN address and the port in the app's Face Motion v3 settings and start sending. Do not enter `0.0.0.0` in the app.
+
+The receiver (PC) never quits because the phone went quiet. After a few retries it keeps its port open (`State=WAITING`) and accepts the next start from the app.
+
+## 4. Ports
+
+| App | iOS listens (UDP / TCP) | This PC listens (UDP / TCP) |
+|---|---|---|
+| iFacialMocap, iFacialMocapTr, Facemotion3d | 49983 / 49984 | 49983 / 49984 |
+
+`--ios-port` changes the port on the phone that the PC connects to. `--pc-port` changes the port this PC listens on. Each side uses one port per transport. If the PC port is already used by another program, the receiver (PC) stops with a message saying so. It does not switch to another port.
+
+## 5. Supported app versions
+
+| App | Version |
 |---|---|
-| **iFacialMocap** | **1.5.3 or later** |
-| **iFacialMocapTr** | **1.2.6 or later** |
-| **Facemotion3d** | **1.4.6 or later** |
+| iFacialMocap | 1.5.3 or later |
+| iFacialMocapTr | 1.2.6 or later |
+| Facemotion3d | 1.4.6 or later ("Other" or "Unity" license) |
 
-**Only the versions listed above and later versions are supported. Earlier versions of each app are not supported.** Update the app before using this sample if its version is below the listed minimum.
+These versions use **FMV3 contract revision 5**. Beta builds made before that used revision 4. The app and the receiver (PC) then refuse each other with a message, so update both. This is a v3-only receiver. It does not read the v1/v2 text format.
 
-The iOS app must support **FMV3 `contract_revision = 4` on the standard ports**. This is a **v3-only** receiver: it does not decode or automatically fall back to v1/v2 text packets.
+## 6. Use the values in your own program
 
-## 2. Try it without an iPhone — two terminals
-
-| File | When to use it |
-|---|---|
-| **`face_motion_v3.py`** | The receiver. This file **alone** can communicate with a compatible iPhone/iPad. |
-| **`simulate_ios_v3.py`** | An optional synthetic sender for testing without an iPhone. Keep it beside `face_motion_v3.py`. |
-
-Open **two terminals in the same folder**, and run them in this order.
-
-**Terminal 1 — synthetic sender**
-
-```sh
-python simulate_ios_v3.py --transport udp --port 51083 --count 52 --change-after 0
-```
-
-**Terminal 2 — receiver**
-
-```sh
-python face_motion_v3.py --host 127.0.0.1 --transport udp --port 51083
-```
-
-For TCP, replace `udp` with `tcp` in **both** commands. Stop **both** programs with Ctrl+C when finished.
-
-`127.0.0.1` means this computer. **51083 is only a simulator test port**, not a new iOS default. It avoids a bind conflict when the sender and receiver run on one computer. The receiver still uses its normal local port: UDP49983 or the TCP49986 manual listener.
-
-This demo sends **52 synthetic fields**, not the 52 standard ARKit names. `jawOpen` changes; many other values are intentionally constant. `count=52` confirms the received value count. `--change-after 0` keeps the schema unchanged. Remove that option to test a schema change: the default adds one custom field after 30 frames.
-
-The simulator is **not an iOS/ARKit emulator** and does not use a camera. Its ACK/retry code is included in the same file; no `schema_delivery.py` is needed.
-
-## 3. Start manually from the iOS app
-
-Run the receiver first, then enter the **PC's LAN IP and receiving port** in the iOS app's v3 manual-send settings:
-
-```sh
-python face_motion_v3.py --listen --transport udp   # PC UDP49983
-# OR
-python face_motion_v3.py --listen --transport tcp   # PC TCP49986
-```
-
-Do not enter `0.0.0.0` as the destination IP. UDP replies with a schema ACK; TCP uses the accepted connection without an application-layer ACK. The receiver remains listening after bounded recovery attempts.
-
-| App | iOS UDP | PC UDP | iOS direct TCP | PC manual TCP |
-|---|---:|---:|---:|---:|
-| iFacialMocap / iFacialMocapTr | 49983 | 49983 | 49984 | 49986 |
-| Facemotion3d | 49993 | 49983 | 49994 | 49986 |
-
-`--port` overrides the iOS/simulator destination; `--listen-port` overrides the receiver's local port. Normal TCP uses one PC-initiated connection in both directions; PC49986 is for manual incoming connections, not a second reply connection.
-
-Do not launch two receivers on the same local port. Facemotion3d requires the “Other” license; add `--app facemotion3d` to the receiver command.
-
-## 4. Use values in your own project
-
-Import `V3Client` from `face_motion_v3`; use callbacks and numeric fields, **not parsed console logs**. Resolve field indices when the schema arrives; use those indices for each frame. For example:
+Read values from the callbacks, not from the printed lines. Look up BlendShape names once when a schema arrives (the SCHEMA is the BlendShape name list and how to read the numbers), then read by index on every frame:
 
 ```python
 from face_motion_v3 import V3Client
 
-jaw_index = None
+jaw = None
 
 def on_schema(schema):
-    global jaw_index
-    jaw_index = schema.index_by_name.get("jawOpen")
+    global jaw
+    jaw = schema.index_by_name.get("jawOpen")      # names can change; look up again here
 
 def on_frame(frame):
-    if jaw_index is not None and frame.tracking:
-        jaw = frame.blend_values[jaw_index] / 100.0
-        # Pass jaw to your renderer; do not block the receiving loop.
+    if jaw is not None and frame.tracking:
+        value = frame.blend_values[jaw] / 100.0    # integer percent: -25 -> -0.25
+        # frame.head = (rx, ry, rz, px, py, pz); frame.right_eye / frame.left_eye = (rx, ry, rz)
 
-V3Client("PHONE_IP", transport="udp").run(on_frame, on_schema=on_schema)
+V3Client("PHONE_IP").run(on_frame, on_schema=on_schema)
 ```
 
-The item count is **not fixed at 52**. Names are in `frame.schema.blend_names`; all values are in `frame.blend_values`. Head/eye values are `frame.head`, `frame.right_eye`, and `frame.left_eye`. Signed BlendShape integers use percentage points: `-25` → `-0.25`; do not clamp negative values or values above 100 in the decoder. `.run()` blocks its calling thread; GUI apps should manage threading and render updates appropriately.
+- The number of BlendShapes is **not fixed at 52**. It depends on the app and its settings, and the list can change during a stream, for example when playback starts of a recording with another BlendShape list (`on_schema` is called each time). All names are in `frame.schema.blend_names`, and all values are in `frame.blend_values`.
+- Values below 0 or above 100 are valid. Do not clamp them in the decoder.
+- `frame.tracking` is `True` while the face is tracked. Frames keep arriving while the face is lost, with `False`. With live values it shows whether the camera tracks the face now. During playback it shows the state recorded with that frame (whether the face was tracked when it was recorded), and only for an old recording without that state does it show the current camera state. `frame.playback` is `True` while a recording is played back (the `flags` in section 3.2 of the specification).
+- `run()` blocks the calling thread. Keep callbacks short, and hand values to your renderer.
+- Options: `transport="tcp"`, `listen_only=True`, `ios_port=`, `pc_port=`. `fps=` and `udp_size=` (`--fps`, `--udp-size`) are sent in the HELLO of a normal start. A manual start from iOS uses the app's own settings and is accepted at any valid value (1–60 fps, 576–1200 bytes).
 
-For Facemotion3d (with the “Other” license), pass `app="facemotion3d"` to `V3Client`. iFacialMocapTr uses the default app setting.
+## 7. Try it without an iPhone
 
-## Reference and troubleshooting
+`simulate_ios_v3.py` pretends to be the iOS app with synthetic values (not ARKit). Keep it next to `face_motion_v3.py`, and use two terminals in that folder.
 
-[Wire specification (English)](PROTOCOL_V3.md) · [Japanese specification](PROTOCOL_V3_JA.md) · [Transmit diagram](diagrams/FMV3_PC_to_iOS_EN.png) · [Receive diagram](diagrams/FMV3_iOS_to_PC_EN.png) · [Diagram text (English)](diagrams/DIAGRAM_TEXT_EN.md) · [Expected byte vectors](golden_vectors.json)
+**Normal start.** On one PC, the simulated phone needs its own port, here 51083:
 
-The documents, diagrams and byte vectors are **not runtime dependencies**. The byte vectors are optional answer keys for another-language implementation. Maintainer tests and old result logs are deliberately not included in this small sample; the simulated exchange is not a substitute for real-device testing.
+```sh
+python simulate_ios_v3.py --ios-port 51083                      # terminal 1
+python face_motion_v3.py --host 127.0.0.1 --ios-port 51083      # terminal 2
+```
 
-If a port is already in use, close the other receiver normally before retrying. If no values arrive, check the iOS build, IP, transport and firewall. When reporting a problem, include the app/build, device/OS, command and last successful stage (`SCHEMA`, `WAIT_FRAME`, `STREAMING`, or `RECOVERING`).
+**Manual start.** The simulated phone sends first:
 
-Use a trusted LAN only: FMV3 has no authentication or encryption. Do not expose these ports to the public Internet.
+```sh
+python face_motion_v3.py --listen                               # terminal 1
+python simulate_ios_v3.py --push-host 127.0.0.1                 # terminal 2
+```
 
-## Background: why v3 was created
+Add `--transport tcp` to **both** commands for TCP. The simulator sends 3 BlendShapes and adds a 4th after 30 frames (a schema change). `--change-after 0` keeps one schema, and `--count 52` sends 52. Its fault options (`--drop-first-schema`, `--mute-after`, …) test the recovery of a receiver (PC). A simulated exchange does not replace a test with the real app.
 
-The earlier **v1/v2 protocols are text-based**: each frame carries field names and values as readable text. This makes the format easy to inspect and a basic receiver relatively straightforward to write.
+## 8. Troubleshooting
 
-v3 grew out of feedback from an embedded developer whose device spent more CPU time parsing incoming strings than rendering. The goal was to reduce repeated text parsing and transmitted field names, leaving more resources for the application—not to make the receiver's overall implementation simpler.
+- **"port … is already in use"**: another receiver program or the simulator is running on that port. Close it or pick another `--pc-port`. Right after a TCP connection closes, the OS can keep the port busy for up to a minute.
+- **`iOS refused the request: 'UNSUPPORTED_CONTRACT: requires 4'`**, or a message saying a SCHEMA looks like one from a revision-4 app: the app is an old beta (revision 4). Update the app.
+- **`iOS refused the request: 'BUSY'`** (or another text): the app declined to start. See the list of reasons in the specification, [section 3.8](PROTOCOL_V3.md#error).
+- **No values**: check the phone's address, the transport, the Wi-Fi network, and the PC firewall for the ports in section 4. In Facemotion3d, also check that "Settings → Other functions → No connection accepted from PC" is off (while it is on, TCP connections fail).
+- When reporting a problem, include the app and version, the device, the command, and the last `State=` line.
 
-In v3, a **`SCHEMA` defines the field names, order, and numeric types**. Subsequent `FRAME` payloads carry binary numeric values in that order. The receiver resolves names when it receives or updates the schema, rather than splitting strings, looking up names, and converting text to numbers for every frame. The order is fixed **within each schema**, not permanently: fields can be added or changed, and the item count is not fixed at 52.
+FMV3 has no authentication or encryption. Use it on a trusted LAN, and never expose these ports to the Internet.
 
-## Choosing v1/v2 or v3
+## 9. Why v3?
 
-[Official v1/v2 communication documentation — iFacialMocap](https://www.ifacialmocap.com/for-developer/)
+The v1/v2 protocols are **text**: every frame repeats all BlendShape names with their values. They are easy to read and easy to start with. [Official v1/v2 documentation](https://www.ifacialmocap.com/for-developer/)
 
-| Consideration | v1/v2 — text | v3 — schema + binary values |
+v3 started from an embedded developer whose device spent more CPU time parsing these strings than rendering. In v3 a **SCHEMA** sends the list of BlendShape names (in order) and the number type once. Every **FRAME** then carries only binary numbers in the order of that list. The list is fixed *per schema*, not forever: BlendShapes can be added or renamed, and custom BlendShapes are included.
+
+| | v1/v2 (text) | v3 (schema + binary) |
 |---|---|---|
-| Inspecting received data | Names and values are readable directly in the text. | Decode the binary data using the schema; this sample prints the decoded values. |
-| Getting a basic receiver working | Usually the more intuitive starting point for a small script or prototype. | More implementation work: schema management, binary validation, and transport-specific control. |
-| Continuous reception | Repeats field names and text-to-number parsing each frame. | Avoids repeated field names in FRAME payloads and per-frame text parsing. |
-| Bandwidth during continuous streaming | Repeats field names and text-formatted values in each frame. | Typically fewer motion-data bytes for the same field set and frame rate. |
-| Good fit | Readable debugging, simple integrations, or existing projects where parsing and bandwidth are not bottlenecks. | Embedded receivers, custom renderers, or continuous streams where parsing CPU time or bandwidth is a bottleneck. |
+| Reading the data by eye | Easy | Needs a decoder (this sample prints decoded values) |
+| First working receiver | Usually quicker | More work: schema, validation, ACK and recovery |
+| Work per frame | Split strings, look up names, convert text | Copy numbers by index |
+| Data per frame | Names + text numbers | Numbers only |
 
-**v3 is an additional option, not a requirement to migrate a working v1/v2 integration.** Simpler code and directly readable data can be more useful than binary efficiency. This repository implements **v3 only**; it does not decode or fall back to v1/v2. An existing v1/v2 receiver needs explicit v3 support to receive v3 data.
+**Less bandwidth.** 52 BlendShapes as `i16` take **192 bytes per FRAME** (40 header + 104 values + 48 head/eyes). That is **11,520 bytes/s at 60 fps** for FRAMEs. This number is calculated, not measured. Schema exchange, control messages and network headers add a little. Less data does not by itself guarantee lower latency or a higher frame rate.
 
-### Smaller motion frames, less bandwidth
+**Embedded receivers.** v3 removes repeated text parsing, but a receiver (PC) still needs schema storage, fragment reassembly, validation and the UDP acknowledgement. Measure CPU and memory on your target. The Python files are a reference and a test tool. Implement the [specification](PROTOCOL_V3.md) in C, C++ or any other language, and use `golden_vectors.json` to check your bytes.
 
-For a typical continuous stream carrying the same fields at the same frame rate, **v3's binary motion frames are smaller than the equivalent v1/v2 text frames**, so less motion data needs to be sent and received and the stream uses less network bandwidth. Names and numeric types are sent in the schema rather than repeated in every FRAME.
+v3 is an additional option. A working v1/v2 integration does not need to change.
 
-For example, **52 BlendShapes encoded as `i16` use 192 bytes per unfragmented FMV3 FRAME**: 40 bytes of header + 104 bytes of BlendShape values + 48 bytes of head/eye values. At 60 frames per second, that is **11,520 bytes/s (11.52 kB/s) for FRAME messages alone**. This is a calculation from the [wire layout](PROTOCOL_V3.md), not a measured performance benchmark.
+## 10. License
 
-Network headers, schema exchange/updates/retries, and control messages such as ACK and PING/PONG add traffic. Savings depend on field names, text formatting, field count, and stream duration; **not every message or short session is guaranteed to be smaller**, and reduced bandwidth does not guarantee lower latency or a particular frame rate.
+The code and documents in this repository are released under the **[MIT License](LICENSE)**. You may use, modify and redistribute them, including commercially, as long as you keep the copyright and permission notices.
 
-### Using v3 in an embedded environment
-
-v3 can help resource-constrained receivers by reducing repeated work in the per-frame path. **It does not guarantee lower total memory use, a smaller implementation, or a particular frame rate on every device.** The receiver still needs to parse and store the schema, manage receive/reassembly buffers, and implement validation, schema updates, and the required communication control—including schema acknowledgements on UDP. Measure CPU time and memory use on the target hardware.
-
-The Python files are a **reference implementation and a test tool**, not a requirement to run Python on an embedded device. You can implement the same protocol in C, C++, or another suitable language using [the wire specification](PROTOCOL_V3.md). Choose v3 when the reduced per-frame work is worth its additional protocol handling; v1/v2 may be the simpler choice when implementation size or ease of debugging matters more.
-
-## License
-
-The source code and accompanying documentation in this repository are released under the **[MIT License](LICENSE)**. Commercial use, modification, redistribution, and integration into other projects are permitted, provided that the copyright and permission notices are retained as required by the license. The software is provided without warranty; see `LICENSE` for the complete terms.
-
-This license covers the repository materials, **not the iOS apps themselves**. The apps' separate purchase and licensing requirements remain unchanged. In particular, using this interface with Facemotion3d requires its **“Other” license**; this does not restrict the MIT-licensed sample code's reuse.
+The license covers this repository, **not the iOS apps**. The apps' own purchase and license terms still apply. Using this interface with Facemotion3d requires its **"Other" or "Unity" license**.

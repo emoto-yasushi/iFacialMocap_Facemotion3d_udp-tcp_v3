@@ -1,284 +1,217 @@
-# Face Motion v3 — Communication protocol
+# Face Motion v3 — Receiver specification
 
-[日本語](PROTOCOL_V3_JA.md) · [Run the Python sample](README.md)
+[日本語](PROTOCOL_V3_JA.md) · [README](README.md) · [Changes](CHANGELOG.md)
 
-This document is for developers building a receiver for iFacialMocap, iFacialMocapTr, or Facemotion3d. **Receiver** means the program on a PC or an embedded device. **iOS** means the app sending the motion data.
+**Contract revision 5.** This document is for people who write a program that *receives* motion data from **iFacialMocap**, **iFacialMocapTr** or **Facemotion3d**. Below, the program that receives the data on a PC or an embedded device is called the "**receiver (PC)**", and the iPhone/iPad app that sends it is called "**iOS**".
 
-The exchange has two parts: iOS first sends a **SCHEMA**, which lists the field names and their order. It then sends **FRAME** messages containing numeric values in that order. UDP requires the receiver to acknowledge the schema before iOS sends frames; TCP does not.
+In Face Motion v3 (FMV3), iOS first sends a **SCHEMA** (the table) once: the **list of BlendShape names** and **how to read the numbers** (for example, how many bytes one value uses). After that, every frame is a **FRAME** that carries **only numbers, in the same order as the BlendShape name list in the SCHEMA**. The head and eye values have no names; they always follow the BlendShape numbers in a fixed order.
 
-| What you need | Read |
+When a SCHEMA arrives, the receiver (PC) builds a "name → position" map once. After that it never parses text per frame; it just reads numbers by position.
+
+| | |
 |---|---|
-| Connect and start receiving | [2. Connection steps](#connections) |
-| Build or decode a message | [3. Message formats](#messages) |
-| Handle changed fields | [4. Schema changes](#schema-changes) |
-| Handle missing data and reconnect | [5. Keeping communication running](#communication) |
-| Check incoming data and resource limits | [6. Validation](#validation) |
+| Transport | **UDP** (recommended) or TCP |
+| Byte order | Little-endian, no padding. A number of two or more bytes is written **lowest byte first** (for example, 1200 is `04B0` in hexadecimal, so it is sent as `b0 04`). There are **no empty bytes** between fields. A C struct copied as a whole may contain gaps added by the compiler, so read and write one field at a time |
+| Message shape | Every message is "a 40-byte **header** + a **body** (payload)". The header is the common envelope of every message and holds its type and length. The **body (payload)** is the content that follows the header and is specific to the message (for a FRAME, the numbers). Some messages have no body |
+| BlendShape list | Not fixed at 52. The number depends on the app and its settings (custom BlendShapes, voice-input settings and so on). It normally stays the same during one stream, but **it can change in the middle of a stream**, for example when playback starts of a recording with another BlendShape list. When it changes, a new SCHEMA arrives ([section 4](#changes)) |
+| Security | None. Use a trusted LAN only |
 
-**Protocol:** `contract_revision = 4`. This edition reorganizes the existing requirements; it does not change the wire format. Source specification: 2026-09-18; editorial update: 2026-09-23.
+Contents: [1 Basics](#basics) · [2 UDP step by step](#udp) · [3 Messages](#messages) · [4 Schema changes](#changes) · [5 Timers and recovery](#timers) · [6 TCP](#tcp) · [7 Limits and validation](#limits) · [8 Compatibility](#compat)
 
-The connection overview is a starting point, not the entire implementation. Receivers also need the framing, validation, and recovery rules below. The reviewed Python snapshot has [known implementation differences](#known-issues); those are not alternative protocol rules.
+<a id="basics"></a>
+## 1. Basics
 
-<a id="overview"></a>
+### 1.1 Ports
 
-## 1. What the protocol carries
+Each side listens on exactly one port per transport. There are no fallback ports.
 
-v3 carries BlendShape values and head/eye poses for live tracking and live playback of recordings. Every FRAME carries all values, including zeros. Frames are independent: there are no differences from an earlier frame to apply.
+| App | iOS listens (UDP / TCP) | Receiver (PC) listens (UDP / TCP) |
+|---|---|---|
+| iFacialMocap, iFacialMocapTr, Facemotion3d ("Other" or "Unity" license) | 49983 / 49984 | 49983 / 49984 |
 
-The schema can change. Its field order stays fixed until it is replaced, but neither the names nor the count are permanently fixed at 52. A session supports one receiver at a time and must not take over another active transfer.
+Facemotion3d needs its "Other" or "Unity" license. With either license, v3 sends the "Other" output (the iFacialMocap-compatible output). v3 therefore uses the same ports as iFacialMocap, and the receiver (PC) does not need to know which app is sending.
 
-Only the schema uses JSON. FRAME carries binary numbers, without field names, JSON, CSV, Base64, compression, or text delimiters. The application does not acknowledge or retransmit individual motion frames. TCP still performs its own transport-level acknowledgements, ordering, and retransmission.
+- **Normal start**: the receiver (PC) knows the phone's address and contacts the **iOS port**.
+- **Manual start**: the user types the receiver's address into the iOS app, and iOS contacts the **receiver (PC) port**.
 
-Bulk recording transfer, FBX, audio files, body data, and software-specific bridges remain on their existing paths. The v3 change does not add, remove, or replace Bluetooth functionality. Instructions for preserving the existing iOS paths are in [Appendix A](#ios-notes).
+If a receiver (PC) port is already used by another program, report that clearly and stop. Do not pick another port on your own. Users can change ports on both sides.
 
-<a id="supported-apps"></a>
+### 1.2 Terms
 
-### 1.1 Supported apps
-
-| App | Minimum version |
+| Term | Meaning |
 |---|---|
-| iFacialMocap | 1.5.3 |
-| iFacialMocapTr | 1.2.6 |
-| Facemotion3d | 1.4.6 |
+| Session | One stream, from the moment iOS starts sending until it stops. Each time iOS starts sending, it picks a number to tell this stream apart from others, `session_id` (a random nonzero 64-bit value), and puts it in the header of every message of that session. The receiver (PC) uses it to tell whether data belongs to the stream it is receiving, so that late data from an earlier stream is never mixed in |
+| Table (SCHEMA) | The BlendShape name list and how to read the numbers. Within a session, tables are numbered by `schema_id` (1, 2, …); the number grows each time the order of names or the value type (i16→i32) changes |
+| `client_nonce` | A random nonzero 64-bit value the receiver (PC) picks for each normal start. "Nonce" means "a number used only once", and this value is also called "the HELLO nonce". The receiver (PC) puts it in the `session_id` field of the HELLO header, and iOS copies it unchanged into the SCHEMA start information ([3.4](#schema)). By checking that the SCHEMA's `client_nonce` equals the value in its own HELLO, the receiver (PC) confirms that this SCHEMA answers its current HELLO, and is not an old SCHEMA from an earlier run or one meant for another PC. A value of 0 in SCHEMA means iOS started the stream (manual start) |
+| Revision | `contract_revision`, the version of this wire contract: **5** |
 
-These versions and later versions are supported; earlier versions are not. Facemotion3d requires its **Other license**. iFacialMocapTr uses the same connection defaults as iFacialMocap.
+### 1.3 What a FRAME contains
 
-Set `contract_revision` to **4** in HELLO and in SCHEMA's start information. Reject other values; do not fall back automatically to another revision. App versions and `contract_revision` are different identifiers.
+- **BlendShape values**: one signed integer per name of the SCHEMA, in the same order. The unit is *percent*: `25` means 0.25, `-25` means −0.25 and `150` means 1.5. Values below 0 and above 100 are valid.
+- **Head**: rotation x, y, z in degrees and position x, y, z in meters (after the app's own scaling, axis settings and calibration).
+- **Right eye** and **left eye**: rotation x, y, z in degrees.
+- **State**: whether the face is tracked (tracking; during playback, whether it was tracked when the frame was recorded) and whether a recording is being played back (playback), in the header's `flags` ([3.2](#header)).
 
-<a id="terms"></a>
-
-### 1.2 Names and numbers used below
-
-A **message** consists of a common header followed by its **payload** (the body). A **session** is one accepted stream between iOS and a receiver. A session can contain more than one schema if fields change.
-
-| Field | Meaning |
-|---|---|
-| `message_type` | What the message is: HELLO, SCHEMA, FRAME, and so on. It is not a step number. |
-| `session_id` | Identifies the stream. iOS generates it. The header uses the receiver's nonce instead for HELLO and an ERROR rejecting a pending HELLO. |
-| `client_nonce` | A value the receiver generates so it can match a startup response to its HELLO. Manual startup uses 0 in SCHEMA's start information. |
-| `schema_id` | Identifies a schema within the session. Increase it when the schema changes. |
-| `sequence` | A frame number on FRAME, or a control sequence on PING/PONG. Its per-message rules are in Section 3.2. |
-| `schema_version` | The version of the schema JSON format: **1**. |
-| `contract_revision` | The version of this wire contract: **4**. |
-
-“Sender address” means the other end's IP address and port. For TCP, also track the actual connection: a later connection using the same address is still a new connection.
-
-<a id="connections"></a>
-
-## 2. Connection steps
-
-Choose normal startup when the receiver knows the iPhone/iPad's IP address. Choose manual startup when the user enters the receiver's IP address in the iOS app. These are different starting directions, not different message formats.
-
-To run the supplied programs rather than implement a receiver, use the commands in [README.md](README.md).
-
-<a id="ports"></a>
-
-### 2.1 Standard ports
-
-| App | iOS UDP listener | Receiver UDP listener | iOS direct TCP listener | Receiver manual TCP listener |
-|---|---:|---:|---:|---:|
-| iFacialMocap / iFacialMocapTr | 49983 | 49983 | 49984 | 49986 |
-| Facemotion3d | 49993 | 49983 | 49994 | 49986 |
-
-Normal TCP uses one receiver-initiated connection for traffic in both directions. Its source port may be assigned by the OS. Keep the receiver's **49986 listener open alongside it** for incoming manual connections; it is not a second connection used to deliver normal replies.
-
-When the user chooses other ports, match the explicit settings at both ends. Do not overwrite saved settings. If a required local port is occupied, report the conflict rather than silently choosing another port or stopping the other process.
-
-The receiver and iOS normally run on different devices, so using the same UDP port number is valid. When a simulator and receiver run on one computer, explicitly change the simulator's port to avoid a local bind conflict. See the README's simulator example.
-
-<a id="udp-start"></a>
-
-### 2.2 Normal UDP startup
-
-Bind the receiver's UDP socket to its receive port, then send HELLO to the iOS UDP port. Use that same receiver socket for all subsequent messages.
+<a id="udp"></a>
+## 2. UDP step by step
 
 ```text
-Receiver                                      iOS
-   |---- HELLO (type 1) ----------------------->|
-   |<--- SCHEMA (type 3) -----------------------|
-   |     Validate and store the entire schema  |
-   |---- SCHEMA_ACK (type 10) ----------------->|
-   |<--- FRAME (type 4) ------------------------|
-   |<--- FRAME (type 4) ------------------------|
+Receiver (PC)                                   iOS
+  bind UDP 49983
+  |---- HELLO (1) ------------------------------->|  to iOS UDP 49983
+  |<--- SCHEMA (2), usually about 3 datagrams ----|
+  |     reassemble, validate, store               |
+  |---- SCHEMA_ACK (3) --------------------------->|
+  |<--- FRAME (4) --------------------------------|  repeated, up to the agreed FPS
+  |---- PING (6) every 3 s ----------------------->|
+  |<--- PONG (7) ---------------------------------|
+  |---- STOP (8) when the receiver (PC) quits ---->|
 ```
 
-iOS replies **from the socket that received HELLO**, to the receiver's actual source IP address and port. SCHEMA contains the startup response as well as the field mapping.
+The numbers in brackets are message type numbers ([3.1](#types)).
 
-The receiver sends SCHEMA_ACK only after all schema fragments have arrived, the contents have been validated, and the field mapping has been stored. iOS sends no FRAME until it receives the correct ACK. The same rule applies after a schema change.
+1. **Bind** a UDP socket to the receiver (PC) port. Use this one socket for everything: iOS replies to the address and port the receiver (PC) sends from.
+2. Pick a new random `client_nonce` (the number of this HELLO, [1.2](#basics)) and **send HELLO**. If no SCHEMA arrives, send the same HELLO again every second, 5 times in total.
+3. **Receive SCHEMA.** It may arrive in several datagrams (fragments, [3.9](#fragments)). Join them, check that `client_nonce` equals your nonce, validate the JSON, and store the table.
+4. **Send SCHEMA_ACK** for that `schema_id`. iOS sends no FRAME before this ACK.
+5. **Receive FRAMEs.** Use the stored table to read the numbers. Skip frames that are older than the last one you used ([3.6](#frame)).
+6. While the session runs, **the receiver (PC) sends PING to iOS every 3 seconds**. When iOS hears nothing from the receiver (PC) for `lease_ms` (normally 10 s), it decides the receiver (PC) is gone and stops sending.
+7. **Send STOP** when the receiver (PC) quits on purpose.
 
-The numbers in this diagram are **message type IDs**. The UDP order is 1 → 3 → 10 → 4; each later FRAME still uses type 4. Missing SCHEMA/ACK messages are handled by [Section 5.3](#schema-retries).
+**Why PING is needed.** UDP has no "connection". If the receiver program quits or the PC leaves the network, iOS cannot notice. Without PING, iOS would keep sending to nobody and keep using battery and network. A sending iOS also refuses other receivers (`BUSY`), so nobody could start again from another PC. The rule "the receiver (PC) sends PING regularly, and iOS stops by itself when PINGs stop" prevents this. The PONG that iOS returns also tells the receiver (PC) that iOS is still running, including while FRAMEs pause (for example, during a schema change). TCP uses the same rule.
 
-<a id="tcp-start"></a>
+When iOS refuses a HELLO, it answers with ERROR instead of SCHEMA. This happens mainly when iOS is already streaming to another receiver, when the license or trial time does not allow streaming now, when the app is not on its tracking screen, when "Settings → Other functions → No connection accepted from PC" is on in Facemotion3d, or when the HELLO has another revision (full list in [3.8](#error)). Show the text to the user. In iFacialMocap and iFacialMocapTr, v1/v2 streaming that a PC handshake started is an exception: a v3 HELLO replaces it instead of getting `BUSY` (details in [3.8](#error)).
 
-### 2.3 Normal TCP startup
+**When iOS stops sending.** When sending stops on the iOS side, no message tells the receiver (PC) (STOP goes from the receiver (PC) to iOS; only when the stream ends with an error does an ERROR arrive). When the user presses Stop in the app, leaves the tracking screen, or the trial time ends, over UDP the FRAMEs simply stop. The receiver (PC) tries to repair as in [section 5](#timers) and then waits (WAITING). Over TCP the connection closes, so the receiver (PC) waits right away. In Facemotion3d with neither the "Other" nor the "Unity" license, iOS does not refuse the HELLO: it starts sending and stops by itself after about 10 seconds.
 
-Connect to the iOS direct TCP port, then send HELLO on that connection. No UDP request is involved.
-
-```text
-Receiver                                      iOS
-   |---- TCP connection ---------------------->|
-   |---- HELLO (type 1) ----------------------->|
-   |<--- SCHEMA (type 3) -----------------------|
-   |<--- FRAME (type 4) ------------------------|
-   |<--- FRAME (type 4) ------------------------|
-```
-
-iOS queues SCHEMA before FRAME. The receiver must validate and store SCHEMA before decoding the following frames. **Do not send an application-layer SCHEMA_ACK on TCP.** A separate GET_SCHEMA at normal startup and periodic schema retransmissions are unnecessary.
-
-A TCP read may contain part of a message or several messages. Parse the stream using [Section 3.9](#tcp-framing), not the boundaries of individual reads. If the receiver cannot store the schema, it must not decode frames and must close the connection with an error.
-
-<a id="manual-start"></a>
-
-### 2.4 Manual startup from iOS
-
-Start the receiver in listening mode first. In the iOS app, enter the receiver's IP address and receive port, then start sending. The receiver does not send HELLO for this startup.
-
-| Transport | Exchange |
-|---|---|
-| UDP | iOS sends SCHEMA to the chosen receiver port → the receiver validates/stores it and sends SCHEMA_ACK → iOS starts FRAME. |
-| TCP | iOS connects to the receiver's TCP listener → iOS sends SCHEMA followed by FRAME on that connection. No SCHEMA_ACK. |
-
-For UDP, iOS waits for ACK on the same socket it used to send SCHEMA. For TCP, both sides use the accepted connection for further messages.
-
-The manual-start SCHEMA has **`client_nonce = 0` in its start information**, a new nonzero `session_id` in its header, and an initial `schema_id` of 1. Each press of the manual-start button starts a new session; it must not take over another active client or a legacy transfer.
-
-iOS selects `actual_fps` in 1–60 and `max_udp_size` in 576–1200; `lease_ms` defaults to 10000 and `contract_revision` is 4. The receiver rejects values above its own permitted FPS/UDP limits, which default to 60 and 1200. The nonce stays 0 throughout that session, including schema updates. Only a receiver configured to allow manual startup accepts this nonce value.
-
-Manual startup uses the same purchase, time-limit, and foreground checks as normal startup. The UDP ACK-wait limit remains 10 seconds. If it expires, iOS ends that attempt and tells the user that receipt could not be confirmed; the receiver keeps listening. Retries, re-ACKs, and GET_SCHEMA must not reset trial/purchase timing or frame numbers.
+**Manual start (UDP).** The receiver (PC) only binds its port and waits. iOS sends SCHEMA with `client_nonce = 0`; the receiver (PC) stores it and sends SCHEMA_ACK to the sender's address, then FRAMEs follow. Each press of Start in the app creates a new session.
 
 <a id="messages"></a>
+## 3. Messages
 
-## 3. Message formats
+<a id="types"></a>
+### 3.1 Message types
 
-Every message starts with the same **40-byte header**. The remaining bytes are its payload. Sizes below are byte counts; offsets start at 0. Send the specified binary bytes, not text describing those bytes.
+The **message type number** is one byte that says what a message is. It is the fifth byte of the header (`message_type` at offset 4). Look at it first to decide how to read the rest. The numbers follow the order of a normal UDP start (HELLO → SCHEMA → SCHEMA_ACK → FRAME).
 
-The layouts in Sections 3.2–3.7 describe complete, unfragmented messages. For UDP fragmentation, use Section 3.8. For boundaries within a TCP stream, use Section 3.9.
-
-<a id="message-type-ids"></a>
-
-### 3.1 Message type IDs
-
-Write one of the following IDs into `message_type`. The ID identifies the message; it does not count the steps in the exchange. Assign these values explicitly rather than numbering them from list positions.
-
-| Decimal | Hex | Message | Direction | Payload |
+| Type | Name | Direction | Body | Purpose |
 |---:|---|---|---|---|
-| 1 | `0x01` | HELLO | Receiver → iOS | 8-byte start request |
-| 2 | `0x02` | **Reserved: unused and prohibited** | — | Not a valid message |
-| 3 | `0x03` | SCHEMA | iOS → receiver | 20-byte start information + schema JSON |
-| 4 | `0x04` | FRAME | iOS → receiver | BlendShape integers + 12 Float32 pose values |
-| 5 | `0x05` | GET_SCHEMA | Receiver → iOS | Empty |
-| 6 | `0x06` | PING | Receiver → iOS | Empty |
-| 7 | `0x07` | PONG | iOS → receiver | Empty |
-| 8 | `0x08` | STOP | Receiver → iOS | Empty |
-| 9 | `0x09` | ERROR | iOS → receiver | UTF-8 reason, 1–512 bytes |
-| 10 | `0x0A` | **SCHEMA_ACK** | Receiver → iOS | Empty; required on UDP |
+| 1 | HELLO | receiver (PC) → iOS | 8 bytes | Asks iOS to start sending |
+| 2 | SCHEMA | iOS → receiver (PC) | 20 bytes + JSON | BlendShape name list, how to read the numbers, session settings |
+| 3 | SCHEMA_ACK | receiver (PC) → iOS | none | "The whole SCHEMA arrived and is stored" (UDP only) |
+| 4 | FRAME | iOS → receiver (PC) | numbers | The values of one frame |
+| 5 | GET_SCHEMA | receiver (PC) → iOS | none | Asks iOS to send the SCHEMA again |
+| 6 | PING | receiver (PC) → iOS | none | "The receiver (PC) is still receiving" |
+| 7 | PONG | iOS → receiver (PC) | none | Answer to PING |
+| 8 | STOP | receiver (PC) → iOS | none | Asks iOS to end the session |
+| 9 | ERROR | iOS → receiver (PC) | UTF-8 text | Reason for a refusal or a session error |
 
-**SCHEMA_ACK is 10 (`0x0A`), not 2 (`0x02`).** Decimal 10 and hexadecimal `0x0A` are the same number. `0x10` is decimal 16 and is not a valid type here.
+Any other type number is invalid (revision 4 used 3 for SCHEMA and 10 for SCHEMA_ACK; see [8](#compat)).
 
-“Reserved” means that type 2 has no permitted use in this contract. Do not send it, accept it as an ACK, or assign your own meaning to it. All other unlisted types are also invalid. Apply the [invalid-data rules](#invalid-data).
+<a id="header"></a>
+### 3.2 Header (40 bytes)
 
-This restriction applies only to `message_type=2`. It does not prohibit 2 in a `schema_id` or numeric value that permits it, and it does not add padding or a missing step. The short history of this unused ID is in [Appendix D.1](#history).
+The 40 bytes at the start of every message. Python can read and write it with `struct.Struct("<4sBBHQIIIIHHI")`.
 
-<a id="common-header"></a>
+**How to read format strings.** A string such as `<4sBBHQIIIIHHI` is a format of Python's `struct` module that describes a sequence of bytes. From left to right, each letter (`4s`: two characters) stands for one value. In other languages, read and write one field at a time using the offsets and types in the tables.
 
-### 3.2 Common header: 40 bytes
+| Format letter | Meaning | Bytes |
+|---|---|---:|
+| `<` | Little-endian, no padding (no gaps between values) | — |
+| `4s` | 4-byte string | 4 |
+| `B` | UInt8 (unsigned integer) | 1 |
+| `H` | UInt16 (unsigned integer) | 2 |
+| `I` | UInt32 (unsigned integer) | 4 |
+| `Q` | UInt64 (unsigned integer) | 8 |
+| `h` / `i` | Int16 / Int32 (signed integer; FRAME BlendShape values) | 2 / 4 |
+| `f` | Float32 (decimal; FRAME head and eye values) | 4 |
 
-All multi-byte integers and Float32 values use **little-endian byte order with no padding**. Python's header format is `struct.Struct("<4sBBHQIIIIHHI")`. Write the fields in order; do not send the native in-memory layout of a Swift struct.
+For example, the HELLO body `<HHI` means "UInt16, UInt16, UInt32 in this order, 8 bytes in total", and the SCHEMA start information `<QHHII` means "UInt64, UInt16, UInt16, UInt32, UInt32 in this order, 20 bytes in total".
 
-| Offset | Size | Type | Field | Meaning |
-|---:|---:|---|---|---|
-| 0 | 4 | bytes | `magic` | ASCII `FMV3`, bytes `46 4d 56 33` |
-| 4 | 1 | UInt8 | `message_type` | ID from Section 3.1 |
-| 5 | 1 | UInt8 | `flags` | FRAME flags; 0 on other messages |
-| 6 | 2 | UInt16 | `header_size` | Always 40 |
-| 8 | 8 | UInt64 | `session_id` | Nonzero iOS session ID; the HELLO/ERROR exception is below |
-| 16 | 4 | UInt32 | `schema_id` | Schema number, as specified below |
-| 20 | 4 | UInt32 | `sequence` | Frame or control sequence, as specified below |
-| 24 | 4 | UInt32 | `source_token` | Used only on FRAME; 0 on all other messages |
-| 28 | 4 | UInt32 | `total_payload_length` | Complete payload size before fragmentation, excluding the header |
-| 32 | 2 | UInt16 | `part_index` | Fragment index, starting at 0 |
-| 34 | 2 | UInt16 | `part_count` | Number of fragments; 1 when unfragmented |
-| 36 | 4 | UInt32 | `chunk_length` | Payload bytes in this packet |
-| 40 | variable | bytes | Payload | Complete payload or one fragment |
+The header fields:
 
-**Which value goes into `session_id`?** HELLO and an ERROR rejecting a still-pending HELLO use that HELLO's `client_nonce`. All other messages use the iOS-generated session ID. The header field is never 0. Manual startup's zero nonce belongs in SCHEMA's payload, not here.
+| Offset | Size | Field | Content |
+|---:|---:|---|---|
+| 0 | 4 | `magic` | ASCII `FMV3`, the mark of an FMV3 message |
+| 4 | 1 | `message_type` | The message type number of [3.1](#types) |
+| 5 | 1 | `flags` | FRAME state (below). 0 on other messages |
+| 6 | 2 | `header_size` | Always 40 |
+| 8 | 8 | `session_id` | The session number ([1.2](#basics)). Nonzero |
+| 16 | 4 | `schema_id` | The table this message uses (below) |
+| 20 | 4 | `sequence` | A counter (below) |
+| 24 | 4 | `source_token` | FRAME only ([3.6](#frame)). Otherwise 0 |
+| 28 | 4 | `total_payload_length` | Size of the whole body in bytes (before splitting) |
+| 32 | 2 | `part_index` | Which piece this is when split, counted from 0 (below) |
+| 34 | 2 | `part_count` | How many pieces the body was split into (below) |
+| 36 | 4 | `chunk_length` | Body bytes in this datagram / message |
 
-| Header field | Per-message rule |
-|---|---|
-| `flags` | On FRAME, bit 0 indicates tracking and bit 1 indicates recording playback. All other bits are 0. The entire field is 0 on other message types. |
-| `schema_id` | Nonzero on SCHEMA, FRAME, and SCHEMA_ACK. On GET_SCHEMA, use a requested schema ID or 0 for the latest. Use 0 on other types. |
-| `sequence` | FRAME uses its frame sequence; PING/PONG use the matching control sequence. ERROR may carry a sequence, with 0 recommended. Use 0 on all other types, including retransmitted SCHEMA. |
-| `source_token` | Only FRAME uses it. SCHEMA and all controls use 0. See Section 6.5. |
+- **`flags`** (FRAME state): bit 0 (value 1) is tracking: 1 means the face is tracked, 0 means the face is lost. With live values it is the current state: whether the camera tracks the face now. During playback it is the state recorded with that frame: whether the face was tracked when the frame was recorded. Only for an old recording that has no tracking state does it show the current camera state. Bit 1 (value 2) is playback: 1 means the values come from a recording being played back, 0 means live camera values. Examples: `1` = live and tracked, `0` = live and face lost, `3` = playback of a frame in which the face was tracked when it was recorded, `2` = playback of a frame in which the face was lost when it was recorded.
+- **`session_id`**: which session the message belongs to. iOS picks it when it starts sending and tells the receiver (PC) in the SCHEMA header. After that, iOS and the receiver (PC) put this same number in every message of the session. When a HELLO is sent there is no session yet (no number has been picked), so a HELLO carries the receiver's own `client_nonce` instead.
+- **`schema_id`**: the number of a table (SCHEMA). The table can change even within one session (for example when playback starts of a recording with another BlendShape list; [section 4](#changes)), so every message that refers to a table says which one. On a SCHEMA it is the number of that table, on SCHEMA_ACK the table that was received and stored, on a FRAME the table to read the numbers with, and on GET_SCHEMA the table to send again (see the example below).
+- **`sequence`**: on a FRAME, a counter that grows by 1 per frame; the receiver (PC) uses it to spot old and duplicate frames. On PING/PONG, it pairs an answer with its PING.
+- **`part_index`, `part_count`, `chunk_length`**: over UDP, a body that does not fit into one datagram (one packet of UDP data) is sent in pieces. `part_count` is the number of pieces, `part_index` is which piece this is (from 0), and `chunk_length` is the body bytes in this piece. Without splitting: `part_index = 0`, `part_count = 1`, `chunk_length = total_payload_length` (`part_count` is 1, not 0).
+  - **FRAME** is normally not split. For example, 52 BlendShapes as i16 take 192 bytes; with the 1200-byte limit, up to 556 fit without splitting.
+  - **SCHEMA** is **normally split** over UDP. A SCHEMA datagram is limited to 576 bytes, and even the standard 52 names make a body of about 1,100 bytes, so it arrives in about 3 pieces. A receiver (PC) must at least be able to join SCHEMA pieces ([3.9](#fragments)).
+  - **TCP** never splits (`part_count = 1` always).
 
-For an unfragmented message, set `part_index=0`, `part_count=1`, and `chunk_length=total_payload_length`. Empty payloads still require the full 40-byte header.
+Values per type:
 
-<a id="hello"></a>
+| Type | Value of `session_id` | Value of `schema_id` | Value of `sequence` |
+|---|---|---|---|
+| HELLO | the `client_nonce` picked by the receiver (PC) (there is no session yet) | 0 (unused) | 0 (unused) |
+| SCHEMA | this session's `session_id`, picked by iOS | the number of this table (starts at 1 and grows by 1 each time the order of BlendShape names or the value type changes) | 0 (unused) |
+| SCHEMA_ACK | the same `session_id` as the received SCHEMA | the `schema_id` of the SCHEMA that was received and stored | 0 (unused) |
+| FRAME | this session's `session_id` | which table to read these numbers with (that table's `schema_id`) | the frame counter |
+| GET_SCHEMA | this session's `session_id` | the `schema_id` of the table to send again; 0 = the newest table | 0 (unused) |
+| PING | this session's `session_id` | 0 (unused) | a number the receiver (PC) picks (1, 2, 3, …) |
+| PONG | this session's `session_id` | 0 (unused) | the same number as the received PING |
+| STOP | this session's `session_id` | 0 (unused) | 0 (unused) |
+| ERROR | this session's `session_id`, or the HELLO's `client_nonce` when refusing a HELLO | 0 (unused) | 0 (unused; ignore other values) |
 
-### 3.3 HELLO: request a stream
+How `schema_id` is used (UDP):
 
-**Direction:** receiver → iOS. **Type:** 1 (`0x01`). **Size:** 40-byte header + 8-byte payload = **48 bytes**.
+```text
+iOS -> receiver (PC)   SCHEMA      schema_id=1  blend_names = [eyeBlinkLeft, jawOpen, mouthSmileLeft]
+receiver (PC) -> iOS   SCHEMA_ACK  schema_id=1   <- table 1 is stored
+iOS -> receiver (PC)   FRAME       schema_id=1  numbers = [10, 45, 3]      <- 3 values in table-1 order
+    (for example, playback starts of a recording that has one more BlendShape)
+iOS -> receiver (PC)   SCHEMA      schema_id=2  blend_names = [eyeBlinkLeft, jawOpen, mouthSmileLeft, myCustomSmile]
+receiver (PC) -> iOS   SCHEMA_ACK  schema_id=2   <- table 2 is stored; iOS now sends in table-2 order
+iOS -> receiver (PC)   FRAME       schema_id=2  numbers = [10, 45, 3, 80]  <- 4 values in table-2 order
+```
 
-| Payload offset | Size / type | Field | Allowed value |
+A FRAME's `schema_id` tells the receiver (PC) which table to read its numbers with, so frames sent around a table change are never mixed up. The `schema_id` in SCHEMA_ACK lets iOS confirm which table reached the receiver (PC).
+
+### 3.3 HELLO
+
+40-byte header + 8-byte body, 48 bytes in total. The body format is `<HHI` (UInt16, UInt16, UInt32 in this order; how to read formats: [3.2](#header)):
+
+| Body offset | Type | Field | Value |
 |---:|---|---|---|
-| 0 | 2 / UInt16 | `requested_fps` | 1–60 |
-| 2 | 2 / UInt16 | `max_udp_size` | 576–1200, including the 40-byte FMV3 header of a FRAME datagram |
-| 4 | 4 / UInt32 | `contract_revision` | 4 |
+| 0 | UInt16 | `requested_fps` | 1–60, the highest frame rate the receiver (PC) wants |
+| 2 | UInt16 | `max_udp_size` | 576–1200, largest FRAME datagram including the 40-byte header |
+| 4 | UInt32 | `contract_revision` | 5 |
 
-The payload format is `<HHI`. For 60 fps and a 1200-byte limit, its bytes are:
+Example for 60 fps and 1200 bytes: `3c 00 b0 04 05 00 00 00`.
 
-```text
-3c 00 | b0 04 | 04 00 00 00
-```
+The `session_id` field of the HELLO header carries the `client_nonce` (the HELLO nonce, [1.2](#basics)) that the receiver (PC) picked for this normal start. iOS returns this value in the SCHEMA start information, so the receiver (PC) can confirm that the SCHEMA answers its own HELLO.
 
-The separators are for reading only. `golden_vectors.json` contains a full 48-byte example under `hello_hex`.
-
-Generate a random nonzero UInt64 `client_nonce` for this startup attempt sequence. Put it in the header's `session_id` field. Keep the same nonce when retransmitting the same HELLO.
-
-```text
-magic = FMV3              message_type = 1        header_size = 40
-session_id = client_nonce
-schema_id = 0            sequence = 0            source_token = 0
-flags = 0                part_index = 0          part_count = 1
-total_payload_length = 8                         chunk_length = 8
-```
-
-iOS checks whether the request is allowed, including purchase/usage conditions and conflicts with active transfers. It returns SCHEMA when accepted, or only ERROR when rejected. A matching rejection makes the receiver display the reason and enter WAITING without closing its listener.
-
-If the first AR update is needed to prepare the schema, iOS sends SCHEMA as soon as that update is available, without waiting for another request. If preparation cannot finish within 5 seconds, it returns a short ERROR and releases the pending startup state.
-
-An identical HELLO from the same source/TCP connection, with the same nonce and contents, returns the same session ID and current schema. It must not reset schema/frame numbers, usage limits, an ACK-wait deadline, or an acknowledged state. Reject different contents with the same nonce, and do not replace an active session with another sender or nonce. The UDP schema-send limit in Section 5.3 also applies to responses to repeated HELLOs.
+Repeat an unanswered HELLO unchanged (same nonce, same body). If the same HELLO reaches a running session, iOS only sends its SCHEMA again; the session is not restarted.
 
 <a id="schema"></a>
+### 3.4 SCHEMA
 
-### 3.4 SCHEMA: define how to read the values
+Body = 20 bytes of **start information** + UTF-8 **JSON**. The start information format is `<QHHII` (UInt64, UInt16, UInt16, UInt32, UInt32 in this order; how to read formats: [3.2](#header)):
 
-**Direction:** iOS → receiver. **Type:** 3 (`0x03`).
-
-```text
-[Common header: 40 bytes] [Start information: 20 bytes] [Schema JSON: J bytes]
-Unfragmented total: 60 + J bytes
-```
-
-iOS generates a random nonzero UInt64 session ID for each new stream. The SCHEMA header carries that `session_id` and the current `schema_id` (1 or higher). Its `flags`, `sequence`, and `source_token` are 0. Initial, updated, and retransmitted schemas all use this same layout.
-
-#### Start information
-
-The first 20 payload bytes use `<QHHII`. JSON starts at payload offset 20, or message offset 60 when unfragmented.
-
-| Payload offset | Size / type | Field | Meaning |
+| Body offset | Type | Field | Meaning |
 |---:|---|---|---|
-| 0 | 8 / UInt64 | `client_nonce` | Echo HELLO's nonzero nonce for normal startup; 0 for manual startup |
-| 8 | 2 / UInt16 | `actual_fps` | Agreed upper bound: 1 through `requested_fps` for normal startup |
-| 10 | 2 / UInt16 | `max_udp_size` | Agreed FRAME datagram limit: 576 through the requested limit |
-| 12 | 4 / UInt32 | `lease_ms` | Time allowed without valid receiver control messages, in milliseconds; default 10000, allowed 5000–60000 |
-| 16 | 4 / UInt32 | `contract_revision` | 4 |
+| 0 | UInt64 | `client_nonce` | Normal start: the `client_nonce` (the HELLO nonce) that the receiver (PC) sent in the `session_id` field of the HELLO header, copied back unchanged by iOS. The receiver (PC) checks that it equals its own value. Manual start: 0, because there is no HELLO |
+| 8 | UInt16 | `actual_fps` | The highest frame rate iOS will actually use: 1 up to `requested_fps`. Manual start: 1–60 (there is no HELLO, so the receiver (PC) has requested nothing) |
+| 10 | UInt16 | `max_udp_size` | Largest FRAME datagram including the header: 576 up to the requested value. Manual start: 576–1200 |
+| 12 | UInt32 | `lease_ms` | How long iOS waits for anything (such as PING) from the receiver (PC), in milliseconds. When nothing arrives for this long, iOS decides the receiver (PC) is gone and ends the session. 5000–60000, normally 10000 (10 s). The receiver (PC) sends PING more often (every 3 s) |
+| 16 | UInt32 | `contract_revision` | 5 |
 
-The nonce, FPS upper bound, UDP limit, lease, and revision stay unchanged within a session. The actual output rate may be below `actual_fps`. To renegotiate the upper bound, start a new HELLO/session. Manual-start values follow Section 2.4.
-
-The receiver adopts the session and schema together only after validating the complete payload. Partial fragments and an early FRAME are not sufficient. Sender/nonce checks and session replacement rules are in [Section 6.2](#session-validation).
-
-#### Schema JSON
-
-Use uncompressed UTF-8 JSON with **exactly these nine keys**. This example defines four BlendShapes; it is not a mandatory field list.
+These values stay the same for the whole session. Example JSON:
 
 ```json
 {
@@ -294,601 +227,212 @@ Use uncompressed UTF-8 JSON with **exactly these nine keys**. This example defin
 }
 ```
 
-| Key | Required meaning/value |
-|---|---|
-| `schema_version` | 1; the JSON format version |
-| `app`, `profile` | `iFacialMocap` / `ifacialmocap-stream`, or `Facemotion3d` / `facemotion3d-other` |
-| `blend_names` | The names in the exact order of the FRAME integer array |
-| `blend_encoding` | `i16` or `i32`, one type for all BlendShapes in this schema |
-| `blend_unit` | `percent` |
-| `pose_layout` | `head_rxyz_pxyz_rightEye_rxyz_leftEye_rxyz` |
-| `rotation_unit` | `degree` |
-| `position_unit` | `meter` |
+| Key | Meaning | What the receiver (PC) does |
+|---|---|---|
+| `schema_version` | Version of this JSON format | Must be `1`. Another number means the keys below changed meaning |
+| `app` | Name of the sending app (for example `"iFacialMocap"`, `"Facemotion3d"`) | For display and logs. Accept any value, including new names |
+| `profile` | Name of the app's output type | Same as `app` |
+| `blend_names` | The BlendShape name list. FRAME numbers follow this order | 0–4096 unique names, each 1–255 UTF-8 bytes, no control characters U+0000–U+001F (see below) |
+| `blend_encoding` | Size of one BlendShape value: `"i16"` = 2-byte signed integer (−32768 to 32767), `"i32"` = 4-byte signed integer | Must be `"i16"` or `"i32"` |
+| `blend_unit` | Unit of the BlendShape values: `"percent"`. 0 to 100 is the usual range and `25` means 0.25 (25 %). Values such as −25 or 150 also occur | Must be `"percent"` |
+| `pose_layout` | Name of the order of the 12 decimals after the BlendShapes. `head_rxyz_pxyz_rightEye_rxyz_leftEye_rxyz` means head rotation x, y, z, head position x, y, z, right eye rotation x, y, z, left eye rotation x, y, z | Must be this value |
+| `rotation_unit` | Unit of rotations: `"degree"` = degrees | Must be `"degree"` |
+| `position_unit` | Unit of positions: `"meter"` = meters | Must be `"meter"` |
+| any other key | Information a future revision may add | Ignore it |
 
-`schema_id` belongs in the header, not the JSON. The numeric-type key is `blend_encoding`, not `value_type`. Do not add keys for licensing or for iFacialMocapTr. The app/profile pairs above remain unchanged.
+When a "must be" key has another value, the numbers cannot be read correctly, so reject that SCHEMA. When a table arrives, build the "name → position" map.
 
-The receiver maps each name to an array position when the schema arrives. It then reads that position in each FRAME. Name, JSON, and size validation rules are in [Section 6.1](#limits).
+**Names.** A name is compared as it is, without Unicode normalization: two names are the same only when their sequences of Unicode code points (equivalently, their UTF-8 bytes) are equal. For example, `é` written as U+00E9 and `é` written as U+0065 U+0301 are two different names, even though they look the same. This rule applies to the uniqueness check, to the "name → position" map and to deciding whether a name changed ([section 4](#changes)). The forbidden control characters are exactly U+0000–U+001F. Other characters, including U+007F and U+0080–U+009F, are allowed.
 
-<a id="schema-ack"></a>
+### 3.5 SCHEMA_ACK
 
-### 3.5 SCHEMA_ACK: confirm that the schema is stored
+40 bytes, no body: type number 3, the SCHEMA's `session_id`, the stored `schema_id`. Send it only after **every** fragment has arrived and the whole table is valid and stored. Only UDP uses it.
 
-**Direction:** receiver → iOS. **Type:** 10 (`0x0A`). **Transport:** UDP only. **Size: 40 bytes, with no payload.**
-
-The receiver sends this message after validating and storing the entire schema. Any `on_schema` callback must finish successfully before the ACK is sent.
-
-```text
-magic = FMV3              message_type = 10       header_size = 40
-session_id = session_id from the accepted SCHEMA
-schema_id = schema_id of the validated, stored SCHEMA
-flags = 0                sequence = 0            source_token = 0
-total_payload_length = 0
-part_index = 0           part_count = 1          chunk_length = 0
-```
-
-Byte offset 4, the fifth byte of the header, contains `0A`. Send the whole header, not that byte alone and not the strings `"0x0A"` or `"10"`. Do not substitute type 2 or place HELLO's nonce in the session ID field.
-
-iOS accepts an ACK only if the sender's IP/port, session ID, and current schema ID all match, and iOS actually sent that schema. An ACK for an older or future schema does not allow FRAME transmission.
-
-The ACK contains no repeated names or checksum. It relies on the complete SCHEMA payload being immutable for each session/schema ID pair. It confirms synchronization, not cryptographic identity. Re-ACKing a saved schema is described in Section 5.3; an ACK never needs another ACK in response.
+Example: `46 4d 56 33 03 00 28 00 08 07 06 05 04 03 02 01 01 00 00 00 …` (the rest is zero except `part_count = 1`; the full 40 bytes are in `golden_vectors.json`).
 
 <a id="frame"></a>
+### 3.6 FRAME
 
-### 3.6 FRAME: read one set of motion values
+A FRAME contains these parts, from left to right.
 
-**Direction:** iOS → receiver. **Type:** 4 (`0x04`). Read the integer array using the names and numeric type in the current schema.
+| Part | Header | BlendShape values | Head | Right eye | Left eye |
+|---|---|---|---|---|---|
+| Content | Common header ([3.2](#header)) | N integers in the order of `blend_names` | rotation rx, ry, rz; position px, py, pz | rotation rx, ry, rz | rotation rx, ry, rz |
+| Type | — | i16 or i32 (the SCHEMA's `blend_encoding`) | Float32 × 6 | Float32 × 3 | Float32 × 3 |
+| Bytes | 40 | i16: 2 × N, i32: 4 × N | 24 | 12 | 12 |
 
-```text
-[Header: 40 bytes] [N BlendShape integers] [Head + right eye + left eye: 48 bytes]
-                   i16: 2 × N bytes
-                   i32: 4 × N bytes
-```
+`N` is the number of `blend_names`. The head and both eyes are 12 Float32 values, 48 bytes together (format `<12f`). For 52 names as i16: 40 + 104 + 48 = **192 bytes**.
 
-Do not add a field count or numeric type to the payload: SCHEMA already provides them. Include every BlendShape value, including 0. `flags` and `source_token` belong in the header, not in this payload.
+- `sequence` counts frames in the session. A frame is newer when `1 ≤ (new − last) mod 2³² ≤ 2³¹ − 1` (new is the received number, last is the last one used). Skip duplicates and older frames. Gaps are normal: iOS drops frames it could not send in time and never resends them.
+- A FRAME for a `schema_id` you do not have yet: skip it and send GET_SCHEMA (at most once per second).
+- A FRAME for an older `schema_id`: skip it. Never read it with the newer table.
+- Face lost: bit 0 of `flags` is 0 (during playback: the face was lost when the frame was recorded; [3.2](#header)). The numbers are still a valid frame.
+- `source_token`: a UInt32 the app sets for its own use. It is not part of the table and not authentication. `0` means "not available". The receiver (PC) may ignore it.
 
-#### BlendShape values
+### 3.7 GET_SCHEMA, PING, PONG, STOP
 
-With an i16 schema defining the following names, the integer portion is:
+Header only (body 0 bytes).
 
-| Array position | Name | Value | Little-endian bytes |
-|---:|---|---:|---|
-| 0 | eyeBlinkLeft | 12 | `0c 00` |
-| 1 | eyeBlinkRight | 8 | `08 00` |
-| 2 | jawOpen | 45 | `2d 00` |
-| 3 | myCustomSmile | -25 | `e7 ff` |
+- **GET_SCHEMA**: "please send table `schema_id` (0 = the newest) again". iOS sends the newest table.
+- **PING / PONG**: keepalive ([section 2](#udp)). iOS copies `sequence` into PONG.
+- **STOP**: ends the session. Send it when the receiver (PC) quits on purpose, not because retries ran out.
 
-Values are signed integer percentage points. Divide by 100 when a consumer needs a coefficient: 25 → 0.25, -25 → -0.25, and 150 → 1.5. The decoder must not restrict values to 0–100.
+<a id="error"></a>
+### 3.8 ERROR
 
-If a value no longer fits i16, iOS must send a new schema using i32 **before sending that value**. Do not automatically downgrade to i16 within the same session. If a value does not fit i32, report ERROR rather than silently clamping it or overflowing. The sender keeps the existing rounding/calculation result; see Appendix A.
+UTF-8 text, 1–512 bytes. Discard an ERROR whose text is not valid UTF-8. When iOS refuses a HELLO, the header carries the HELLO's `client_nonce`. Apply such a refusal only while that HELLO is still unanswered, and never to a session you have already accepted. Otherwise the header carries the session.
 
-#### Head and eyes
+Main reasons (other texts can also arrive; display the received text as it is):
 
-After the integers, read **12 Float32 values** in the order below. `rx/ry/rz` are rotations; `px/py/pz` are positions.
-
-| Order | Object | Values | Bytes |
-|---:|---|---|---:|
-| 1 | Head | rx, ry, rz, px, py, pz | 24 |
-| 2 | Right eye | rx, ry, rz | 12 |
-| 3 | Left eye | rx, ry, rz | 12 |
-
-Rotations are in degrees. Positions are meter-derived values after the app's scaling, axis conversion, calibration, and mirroring. They are not absolute real-world coordinates. Preserve the profile's meaning rather than silently changing to another common coordinate system. All 12 values must be finite; reject NaN, infinity, and payload-length mismatches. Internal values such as `head[6...8]` are not transmitted.
-
-When tracking is lost, clear flags bit 0. The last values may be retained, but they must not be marked as currently tracked. Set bit 1 during live playback. If a recording lacks tracking information, bit 0 reflects the current camera tracking state, not whether the playback data is valid.
-
-Each session has its own UInt32 FRAME sequence. Reject duplicate or older frames using [Section 6.3](#sequence). Do not reset the sequence when the schema changes.
-
-For 52 BlendShapes encoded as i16, an unfragmented FRAME is **40 + 104 + 48 = 192 bytes**. At 60 frames/second, FRAME messages alone use **11520 bytes/second**. Network headers, schemas, and control messages are additional.
-
-<a id="controls"></a>
-
-### 3.7 Other control messages
-
-GET_SCHEMA, PING, PONG, and STOP contain only the common 40-byte header. Their payload lengths are 0, `part_index=0`, and `part_count=1`. Apply the remaining header rules in Section 3.2. Controls from the receiver other than HELLO use the accepted iOS session ID; iOS checks the sender address or TCP connection as well.
-
-| Message | What to send and what happens next |
+| Text | Meaning |
 |---|---|
-| GET_SCHEMA (5) | Put the requested schema ID in `schema_id`, or 0 for the latest. iOS returns that schema, or the latest if it no longer holds the requested one. This does not replace SCHEMA_ACK. |
-| PING (6) | The receiver sends a control sequence; iOS replies with PONG (7) carrying the same sequence. The interval and lease rules are in Section 5.7. |
-| STOP (8) | The receiver explicitly ends the matching v3 session. It must not stop unrelated or legacy transfers. Running out of recovery attempts is not a reason to send STOP. |
+| `BUSY` | iOS is already streaming v3 to another receiver, is sending with v1/v2 or Bluetooth, or is transferring a recording. In iFacialMocap and iFacialMocapTr, this is also the reason while an FBX file is being exported and while a destination is set on the iOS side (a manual start or a v1/v2 destination). Exception: in these two apps, v1/v2 streaming that a PC handshake started is replaced instead (below) |
+| `NOT_ALLOWED` | Purchase state or trial time does not allow streaming now |
+| `PC_CONNECTION_DISABLED` | "Settings → Other functions → No connection accepted from PC" is on in Facemotion3d (the answer to a UDP HELLO). While this setting is on, iOS does not listen on TCP 49984, so over TCP the connection itself fails. A manual start from iOS still works |
+| `V3_NOT_AVAILABLE`, `APP_INACTIVE` | The app is not showing its tracking screen, is in the background, or cannot use the camera. In iFacialMocapTr this is also the reason when trial conditions do not allow streaming now, and in Facemotion3d while an FBX file is being exported |
+| `CAMERA_UNAVAILABLE` | The device does not support face tracking, or camera access is not allowed (iFacialMocap, iFacialMocapTr) |
+| `SCHEMA_NOT_READY` | The app could not prepare the first table within 5 s |
+| `UNSUPPORTED_CONTRACT: requires 5` | The HELLO had another revision |
+| `INVALID_HELLO`, `HELLO_SETTINGS_CHANGED` | HELLO values out of range, or the same nonce was sent with different settings |
+| `SCHEMA_ACK_TIMEOUT` | UDP: no valid SCHEMA_ACK within 10 s, so iOS ended the session |
 
-Before any session has been accepted, repeat the same HELLO instead of GET_SCHEMA. Do not request retransmission of an old FRAME.
+**v1/v2 streaming started by a PC (iFacialMocap, iFacialMocapTr).** In these apps the newest PC handshake wins over v1/v2 streaming that an earlier PC handshake started. A v3 HELLO from a receiver (PC) is therefore not refused because of such streaming:
 
-#### ERROR (9)
+- **Replaced by the v3 HELLO**: v1/v2 sending to the address that iOS learned from a PC's UDP handshake (with the iOS destination setting "default", this includes the TCP connection that iOS opened to the PC after such a handshake), and a v1/v2 TCP connection that a PC opened to iOS. iOS stops this sending, closes these connections and forgets the learned address, then starts the v3 session. The v1/v2 receiver gets no message; its data just stops. The v1/v2 sending does not resume when the v3 session ends.
+- **Still `BUSY`**: a destination that the user set on the iOS side (a fixed IP address, an address entered with the Live button, or the destination of a v3 start from iOS), a Bluetooth connection (including a recording transfer over Bluetooth), exporting an FBX file, and a v3 session that is already running (with another receiver, or started from iOS).
+- **Not affected**: a recording transfer over TCP (a PC pulling recorded frames from port 49984). It does not make the HELLO `BUSY`, and the v3 HELLO does not end it.
 
-ERROR is sent **from iOS to the receiver**. Its payload is a valid UTF-8 reason, **1–512 bytes**, without an added terminator. Its schema ID, flags, and source token are 0; sequence 0 is recommended. For an unfragmented ERROR, set `part_index=0`, `part_count=1`, and both payload-length fields to the reason's byte length.
+The opposite direction is also product behavior: while v3 is not selected as the sending protocol in the iOS app's settings (or the app's own v3 connection to its saved destination has failed), a new v1/v2 handshake from a PC ends a running v3 session that a PC started. The v3 receiver (PC) gets no message; the stream stops as described in "When iOS stops sending" ([section 2](#udp)).
 
-| When iOS sends ERROR | Value in the header's `session_id` field |
-|---|---|
-| Rejecting a HELLO that has not been accepted | That HELLO's `client_nonce` |
-| Reporting an error in an accepted session | The iOS-generated `session_id` |
+<a id="fragments"></a>
+### 3.9 UDP fragments
 
-Apply a HELLO rejection only when its nonce and expected sender/TCP connection match a **still-pending** request. Once a session has been adopted, a delayed rejection of the earlier HELLO must not change that session's state.
+SCHEMA and FRAME may be larger than one datagram. The body is then cut into equal pieces, and the last piece holds the rest. SCHEMA's 20-byte start information appears only once, at the start of the joined body.
 
-For a valid, matching ERROR, display the reason and enter WAITING without terminating the receiver. Validate UTF-8 and the sender/session before applying it. Malformed ERRORs follow Section 6.4. The reviewed receiver has a [known UTF-8 validation difference](#known-issues).
-
-<a id="udp-framing"></a>
-
-### 3.8 Splitting and reassembling UDP messages
-
-SCHEMA may be larger than one UDP datagram. Split its payload at a fixed capacity of **536 bytes**, so each datagram contains at most **576 bytes including its 40-byte FMV3 header**. This rule is fixed before negotiation because the receiver has not yet read SCHEMA's start information.
-
-FRAME uses the negotiated `max_udp_size` instead. For either message:
-
-```text
-SCHEMA: capacity = 576 - 40 = 536
-FRAME : capacity = max_udp_size - 40
-part_count = max(1, ceil(total_payload_length / capacity))
-```
-
-Each datagram contains a header followed by one payload fragment. Every fragment except the last has `capacity` payload bytes; the last has the remainder. There may be at most **512 fragments**. Do not invent separate start, continuation, or end message types.
-
-Within one message, all fragments share `message_type`, `flags`, `session_id`, `schema_id`, `sequence`, `source_token`, `total_payload_length`, and `part_count`. `part_index` selects where each fragment belongs. Concatenate payload fragments in that order, then parse the resulting complete payload. SCHEMA's 20-byte start information occurs only once, at the start of that logical payload, not in every fragment.
-
-Ignore identical duplicate fragments. If fragment contents or metadata conflict, discard the assembly. Fragments from retransmissions of the same schema and same payload may be reused. Never forward an incomplete FRAME to rendering. Buffer and assembly-time limits are in Section 6.1.
-
-Keep the sender's queues bounded: one active schema-send operation, at most one pending resend, and finite batches. Prefer the latest motion over queued old motion. Large field counts may call for a lower UDP frame rate or TCP.
-
-The fixed 576-byte limit does not guarantee delivery on every network path or a particular path MTU. This is a trusted-LAN protocol; use TCP or another appropriate transport when a special path cannot deliver these datagrams.
-
-<a id="tcp-framing"></a>
-
-### 3.9 Finding message boundaries in TCP
-
-TCP provides a byte stream, not one message per read. Keep incoming bytes in a buffer and repeat these steps:
-
-1. Wait until at least 40 bytes are available, then validate the common header.
-2. Wait for the following `chunk_length` payload bytes. Header and payload together form one message.
-3. Process that complete message and keep any remaining bytes for the next message.
-
-On TCP, every message is unfragmented at the application level: `part_index=0`, `part_count=1`, and `chunk_length=total_payload_length`. Do not add a separate four-byte length prefix, a legacy terminator string, or schema-fragment messages.
-
-Serialize writes on each connection. Replace motion that has not started sending with the latest single frame, while preserving the order of a required SCHEMA and its dependent FRAMEs. Do not truncate a message once sending has begun. Limit simultaneous writes and the receive buffer; a stalled network operation must not wait indefinitely.
-
-Discard partial messages when a connection closes. Startup deadlines and the requirement to validate SCHEMA again on a new connection are in [Section 5.6](#tcp-reconnect).
-
-<a id="schema-changes"></a>
-
-## 4. When the schema changes
-
-A value change does not by itself change the schema. Use a new schema ID when the interpretation of the numeric array changes.
-
-| Change | New schema? |
-|---|---|
-| A value changes, tracking is lost, or audio becomes active/inactive | No; reflect it in FRAME |
-| A field is added, removed, renamed, or reordered | Yes; increase `schema_id` |
-| BlendShape encoding changes from i16 to i32 | Yes; increase `schema_id` |
-| Only `source_token` changes | No; update the next FRAME header |
-
-UDP pauses FRAME transmission until the new schema is acknowledged. TCP sends the new schema before frames using it, without waiting for SCHEMA_ACK. A given session/schema ID pair always denotes the same complete SCHEMA payload. If schema IDs run out, start a new session rather than reuse an ID with different contents.
-
-<a id="schema-change-sender"></a>
-
-### 4.1 What iOS does
-
-For UDP, use **pause → send the new schema → receive its ACK → resume with the latest values**.
-
-```text
-iOS → receiver    FRAME using schema 7
-                  iOS commits a change and pauses FRAME
-iOS → receiver    SCHEMA 8
-receiver → iOS    SCHEMA_ACK 8, after validation/storage
-iOS → receiver    FRAME using schema 8
-```
-
-When settings are committed, iOS creates a fixed snapshot of the new schema, numeric type, and field indices. Discard old-schema frames/fragments not yet handed to the OS; already-sent packets cannot be recalled. Cache the new schema, send it, and enter `WAIT_SCHEMA_ACK`.
-
-Resume only for the correct current-schema ACK from the same sender and session. Keep face processing and the display running while waiting, but retain only the latest numeric snapshot. After ACK, send the latest values, not a backlog. Do not reset the FRAME sequence.
-
-If schema 9 is needed before schema 8 is acknowledged, replace the pending schema with 9 and wait only for its ACK. Ignore delayed ACKs for 8 and never mix arrays from the two layouts. Coalesce rapid changes to the latest schema, respecting the one-batch-per-second send limit. Further changes, retries, HELLOs, and PINGs do not extend the original 10-second ACK deadline for that uninterrupted wait.
-
-On TCP, write already-sent old data → new SCHEMA → new FRAMEs on the same connection. No ACK-wait state is used.
-
-<a id="schema-change-receiver"></a>
-
-### 4.2 What the receiver does
-
-Validate all fragments, the start information, and the JSON before replacing the current schema. Invalid input must not overwrite a valid schema. Update the stored indices and type, then complete `on_schema`; only afterward send the UDP ACK.
-
-Once the new schema is committed, discard incomplete old-schema FRAMEs and queued old-schema ACKs. Do not decode late FRAMEs with an older schema ID, and never reinterpret an old numeric array with the new indices.
-
-While still assembling the new schema, a late old FRAME may be decoded using the still-valid old schema. The two mappings must remain separate. The renderer may keep the last already-decoded pose after a schema change; this is different from reusing its old numeric array.
-
-<a id="communication"></a>
-
-## 5. Keeping communication running
-
-There are two different jobs: **iOS waits for confirmation of a schema**, while **the receiver checks that new motion frames keep arriving**. Each side has its own timers. Reaching an iOS send deadline ends that send attempt; it does not require the receiver program to exit.
-
-The following sections cover startup retries, missing schemas or ACKs, missing frames, and a new TCP connection after disconnection.
-
-<a id="states"></a>
-
-### 5.1 Receiver states
-
-| State | Meaning |
-|---|---|
-| `WAIT_SCHEMA` | Waiting for the initial schema in normal startup. |
-| `WAIT_FRAME` | The initial schema is ready; waiting for the first valid frame. |
-| `STREAMING` | Receiving valid, new frames. |
-| `RECOVERING` | Frames have stopped; making a limited number of recovery attempts. |
-| `WAITING` | Automatic attempts have stopped, but incoming data and manual startup can still be accepted. |
-
-`WAITING` does **not** mean that the computer or receiver program has shut down. It keeps the receiving socket/listener open. This is also different from iOS's `WAIT_SCHEMA_ACK` state, in which the sender waits for the receiver's acknowledgement.
-
-<a id="startup-retries"></a>
-
-### 5.2 When startup does not complete
-
-| Receiver operation | Default retry rule | When the attempt limit is reached |
+| Message | Largest datagram | Body per piece (`capacity`) |
 |---|---|---|
-| UDP: no complete initial SCHEMA | Send HELLO immediately, then once per second, at most **5 sends total**. Repeat the same nonce and contents. | Enter `WAITING` and keep the socket open. |
-| TCP: establish a normal outgoing connection | At most **5 connection attempts**, a default **3-second connect timeout**, and at least **1 second between attempts**. | Keep receive waiting rather than retrying forever. |
+| SCHEMA | 576 bytes, always | 536 |
+| FRAME | `max_udp_size` from the start information | `max_udp_size − 40` |
 
-A valid ERROR for the current pending HELLO also moves the receiver to `WAITING`, with its reason displayed. Do not respond to an incomplete first schema with GET_SCHEMA: no session has been adopted yet, so the UDP retry is the same HELLO.
+`part_count = max(1, ceil(total_payload_length / capacity))`. All pieces share every header field except `part_index` and `chunk_length`. Pieces can arrive in any order. Identical duplicates are fine; a piece that contradicts others invalidates that message. Other messages are never split.
 
-Startup also has separate **5-second deadlines**. Do not combine them into one timer:
+How much splitting to expect:
 
-| Who waits | What it waits for | Timing and action |
+| Message | Example | Splitting |
 |---|---|---|
-| iOS, normal TCP startup | A complete HELLO | From accepting the connection. Close that connection if HELLO is incomplete after 5 seconds. |
-| iOS, preparing the startup response | Data needed to build SCHEMA | If the schema cannot be prepared within 5 seconds, send a short ERROR and release the pending startup state. |
-| Receiver, on a new TCP connection | A complete initial SCHEMA | From establishing the connection, or accepting an incoming manual connection. After 5 seconds without a complete initial schema, close that connection but keep the listener. See [5.6](#tcp-reconnect). |
+| SCHEMA | the standard 52 names (body about 1,100 bytes) | 3 pieces (`part_count = 3`) |
+| FRAME | 52 names as i16 (body 152 bytes, 192 bytes in total) | none (`part_count = 1`). With the 1200-byte limit, up to 556 i16 values fit without splitting |
 
-The schema may depend on the first AR update. iOS sends it as soon as it is available, without waiting for an additional request. These limits do not guarantee successful communication on an unavailable network.
+A SCHEMA is sent before the datagram size has been agreed (the `max_udp_size` in its start information), and a manual start has no HELLO at all. It is therefore fixed at 576 bytes, a size every receiver (PC) can take. FRAME uses the `max_udp_size` agreed in the SCHEMA.
 
-<a id="schema-retries"></a>
+<a id="changes"></a>
+## 4. Schema changes
 
-### 5.3 When SCHEMA or SCHEMA_ACK is lost — UDP
+A new `schema_id` means the numbers are ordered differently: BlendShapes were added, removed, renamed or reordered, or the encoding changed from i16 to i32. A name counts as renamed whenever its code points (its UTF-8 bytes) change, even when it looks the same ([3.4](#schema)). The `sequence` counter continues.
 
-Until iOS receives the correct ACK for its current schema, it sends the schema again instead of sending FRAMEs.
+For every FRAME it sends, iOS compares the order of BlendShape names and the value type with the current table, and sends a new table when they differ. Within one stream, the table changes mainly in these cases:
 
-| Missing message | iOS does | Receiver does |
-|---|---|---|
-| All or part of the first SCHEMA | Keeps FRAME stopped and resends the same schema at 1-second intervals. | Does not ACK an incomplete schema; retries HELLO as in 5.2. |
-| All or part of an updated SCHEMA | Keeps FRAME paused and resends the current schema. | Stores and ACKs only a complete, valid schema. Does not guess the new layout from the old one. |
-| SCHEMA_ACK | Keeps FRAME stopped and resends the schema at 1-second intervals. | Recognizes the saved schema and sends its ACK again. |
-| One FRAME | Does not retransmit that frame. | Uses the next fully received, valid frame. |
+- Playback of a recording starts, and the recording's order of BlendShape names or its value type differs from the current table. With the same list and type the table stays the same, and there is no SCHEMA and no SCHEMA_ACK (whether values come from playback is shown by the FRAME `flags`, [3.2](#header)).
+  - iFacialMocap and iFacialMocapTr: a recording's BlendShape names are sent in the same alphabetical order as live values, so a recording with the live BlendShapes keeps the table. The value type is decided from the whole recording (i32 if any value does not fit i16).
+  - Facemotion3d: the order of names changes only when the recording contains a BlendShape name that is not in the current list (names missing from the recording are sent with the value 0). The value type is decided frame by frame, as in the next item.
+  - When playback ends and live values return, the table changes again if the order of names differs from the live one.
+- A BlendShape value no longer fits the i16 range (−32768 to 32767). The encoding becomes i32 and does not go back to i16 until the stream ends. Usual values are about 0 to 100, so this is rare.
 
-**iOS's ACK deadline is 10 seconds.** Start it when sending the initial schema, or when pausing FRAMEs for a schema change. If the current schema is still unacknowledged at that deadline, send `ERROR: SCHEMA_ACK_TIMEOUT` if possible and end that v3 session. The receiver continues listening.
+About the BlendShapes used by Facemotion3d's voice-input feature: the BlendShapes registered in the voice-input settings are in the list from the start of the stream, and are sent with the value 0 while they are not reacting. Speaking therefore never changes the number of names in the list. Facemotion3d's BlendShape settings (the base list, the BlendShapes registered for voice input, name replacement) are fixed when the stream starts; changes apply from the next stream.
 
-SCHEMA sends triggered by HELLO, GET_SCHEMA, and a timer all share **one limit: at most one schema-send batch per second per peer**. A batch is all fragments of one schema transmission, not one fragment. With an initial send at time 0, the available send opportunities are 0, 1, …, 9 seconds; stop at 10 seconds. Do not overlap batches. This is not a combined limit on all control messages; HELLO, GET_SCHEMA, SCHEMA_ACK, and PING have their own rules.
+- **UDP**: iOS stops FRAMEs, sends the new SCHEMA, waits for its SCHEMA_ACK, then continues with the newest values.
+- **TCP**: iOS writes the new SCHEMA before the first FRAME that uses it.
 
-Further schema changes, retransmissions, identical HELLOs, and PINGs do not restart the 10-second wait. Coalesce repeated changes to the latest schema. Continue processing PING/PONG and STOP during the wait. The session lease and existing usage-time limits remain independent: end the session when the earliest applicable deadline expires.
+The receiver (PC) switches to the new table only after the new SCHEMA is complete and valid. Until then it may keep decoding FRAMEs of the old `schema_id` with the old table. A given `session_id` + `schema_id` always means exactly the same bytes; if a repeated SCHEMA differs, it is invalid.
 
-**On the receiver**, send the first ACK immediately after a new schema has been adopted. Subsequent re-ACKs are limited to once per second. If the complete schema is already stored, the receiver may compare a retransmitted fragment with the saved payload and re-ACK without receiving the whole retransmission. This shortcut is valid only because it already holds the complete, validated schema; it never permits ACKing an incomplete first receipt. Identical JSON does not need to be parsed again. There is no ACK of an ACK.
+When iOS receives GET_SCHEMA or a repeated HELLO, it sends the current SCHEMA again (over UDP at most once per second). Over UDP it also resends it every second while no SCHEMA_ACK has arrived. After SCHEMA_ACK has arrived, it does not resend unless asked. When a table you already stored arrives, reply with SCHEMA_ACK again (UDP), at most once per second.
 
-After confirmation, iOS may optionally resend the same schema about every 10 seconds. That alone must not clear the acknowledged state or pause FRAMEs. Neither these retransmissions nor duplicate ACKs reset schema/frame numbers, state, or usage time.
+<a id="timers"></a>
+## 5. Timers and recovery
 
-<a id="frame-recovery"></a>
+All times are defaults in seconds. "Valid" means a message that passed every check in section 7.
 
-### 5.4 When new FRAMEs stop arriving
+| Who | Waits for | Limit | Then |
+|---|---|---|---|
+| Receiver (PC) | SCHEMA after HELLO (UDP) | 5 HELLOs, 1 s apart | Stop sending; keep waiting (WAITING) |
+| Receiver (PC) | TCP connection to iOS | 3 s per attempt, 5 attempts, 1 s apart | Keep waiting (WAITING) |
+| Receiver (PC) | complete first SCHEMA on a new TCP connection | 5 s from connect/accept | Close that connection only |
+| Receiver (PC) | a new valid FRAME | 3 s | Repair: up to 3 times, 1 s apart |
+| Receiver (PC) | a new valid FRAME | 12 s | WAITING |
+| Receiver (PC) | — | every 3 s | PING (not while WAITING) |
+| iOS | SCHEMA_ACK (UDP) | resend SCHEMA every 1 s, give up after 10 s | ERROR `SCHEMA_ACK_TIMEOUT`, session ends |
+| iOS | anything valid from the receiver (PC) | `lease_ms` (10 s) | Session ends |
+| iOS | complete HELLO on a new TCP connection | 5 s | Closes the connection |
 
-Track two timestamps separately:
+- **Repair** = send SCHEMA_ACK for the stored table again (UDP only) and GET_SCHEMA with `schema_id = 0`.
+- The FRAME timer starts when the first SCHEMA is stored and restarts with every new valid FRAME. SCHEMA and PONG do **not** restart it. A frame with the face lost still counts.
+- For the iOS lease, a SCHEMA_ACK counts only when it acknowledges the current SCHEMA that iOS has already sent. An ACK for another `schema_id` is ignored and does not extend the lease.
+- The sample also enters WAITING when nothing valid arrives for `lease_ms`, or when iOS sends ERROR for the session.
+- **WAITING** is not an exit. Keep the port open and keep reading. Send nothing on a timer (no HELLO, PING, GET_SCHEMA or reconnect). Still answer a valid SCHEMA with SCHEMA_ACK. A valid FRAME returns to streaming. A manual start from iOS can begin a new session.
+- While a session is streaming, a SCHEMA from another session is ignored: nobody can take over a running stream.
 
-| Timestamp | Updated by |
-|---|---|
-| `last_valid_receive` | A protocol-valid SCHEMA, PONG, or FRAME. |
-| `last_frame_at` | A new FRAME fully validated and decoded with the current schema. |
+Receiver states used by the sample: `WAIT_SCHEMA` → `WAIT_FRAME` → `STREAMING` ⇄ `RECOVERING` → `WAITING`.
 
-Only the second timestamp tells you that new motion data has arrived. A PONG, schema, ACK retransmission, partial fragment, malformed FRAME, or duplicate/out-of-order FRAME does not update `last_frame_at`. A valid FRAME with `tracking=false` does update it: losing the face is not a network disconnection.
+<a id="tcp"></a>
+## 6. TCP (alternative)
 
-Use the time the initial schema was stored as the **reference time** until the first frame arrives. After that, use the time of the last valid new FRAME.
+TCP carries the same messages with these differences:
 
-| Time since the reference time | Receiver action |
-|---|---|
-| 3 seconds without a new FRAME | Start recovery. |
-| Recovery | Make at most 3 attempts, 1 second apart. UDP sends the saved current schema's ACK and GET_SCHEMA with `schema_id=0`. TCP sends only GET_SCHEMA. |
-| 12 seconds without a new FRAME | Enter `WAITING`; keep the receive endpoint open. Stop timer-driven HELLO, ACK, GET_SCHEMA, PING, and automatic reconnection. |
-| Earlier lease expiry with no valid traffic, or a valid applicable ERROR | May enter `WAITING` before the 12-second frame deadline. Do not exit the program. |
-
-For example, with timely timer execution, the three recovery attempts occur at 3, 4, and 5 seconds. The first ACK sent when adopting a schema is not a recovery attempt. ACKs responding to a schema retransmission are also separate, passive responses with the once-per-second re-ACK limit. A timer-generated ACK and a passive ACK due in the same second may be combined.
-
-The 12-second default allows more time than iOS's independent 10-second ACK wait; do not immediately declare a disconnection when a schema update is awaiting its ACK. During one period without valid frames, a new schema ID or PONG does not reset the reference time or recovery budget. If the schema changes, subsequent re-ACKs refer only to the new current schema; remove queued ACKs for old schemas.
-
-After the receiver has entered `WAITING`, receiving the same or a new schema does not restart exhausted automatic recovery. Validate/store it, finish `on_schema`, and reply with an ACK on UDP. A **valid new FRAME** restores `STREAMING`, normal monitoring, and the three-attempt budget for the next interruption. This requires a schema valid for the current UDP session or the same still-open TCP connection. A new TCP connection must first follow [5.6](#tcp-reconnect).
-
-A freshly started `--listen` receiver has not exhausted recovery. Its first manual SCHEMA therefore starts the initial-frame monitoring described above.
-
-<a id="waiting"></a>
-
-### 5.5 Keep listening after retries stop
-
-**UDP:** Keep using `recvfrom` on the same bound socket. Do not close or recreate the socket, change its port to an automatically assigned one, or send STOP merely to enter `WAITING`. Do not use UDP `connect` to filter to one fixed peer; validate the sender IP and session in the application. A delayed FRAME from the same session may resume reception when its schema and sequence are valid.
-
-**TCP:** Keep reading a connection that is still alive. If it disconnects or the stream is malformed, close only that connection and keep the receiver's TCP listener open. A later manual connection from iOS can start with SCHEMA. Accepting a connection alone does not mean that FRAME reception has started.
-
-While in `WAITING`, timers send no requests or PINGs and make no automatic reconnection attempts. Valid incoming schemas still receive the appropriate UDP ACK. The lease can eventually end the old iOS session while the receiver remains available for a later manual start.
-
-<a id="tcp-reconnect"></a>
-
-### 5.6 Treat a new TCP connection as new
-
-**A new TCP connection needs its own validated initial SCHEMA, even if its remote IP address and port are unchanged.** Do not infer that it is ready from a saved peer/session pair.
-
-Start a 5-second initial-SCHEMA deadline when the connection is established. For an incoming manual connection, this is when the receiver accepts it. Track completion separately for each connection instance. Old session state or partial incoming data must not disable or restart the deadline.
-
-Until a complete initial SCHEMA has been received and validated on that connection and `on_schema` has completed, do not decode or forward its FRAMEs or enter `STREAMING`. An old matching `session_id`/`schema_id`, even with a newer FRAME sequence, is not sufficient. If no complete initial schema arrives within 5 seconds, close that connection and return to listening. Do not accept an unlimited number of concurrent connections.
-
-On disconnection, discard incomplete bytes and stop using that connection's validated state to authorize FRAMEs on a future connection. The last decoded pose and retired-session rejection history may be kept, but they do not replace initial-schema validation. Manual startup still uses a new session ID on each start.
-
-These rules do not prohibit recovery over a TCP connection that never disconnected, nor do they change UDP waiting. After initial-schema validation, the bounded recovery rules in 5.4 still apply.
-
-The reviewed receiver has a defect in this area. See [Appendix C.4](#known-tcp-reconnect); rewriting this document does not fix the code.
-
-<a id="keepalive-stop"></a>
-
-### 5.7 Keepalive and explicit stopping
-
-After adopting a session, the receiver sends PING every **3 seconds** while waiting for numeric data, recovering, or streaming. iOS replies with the same sequence in PONG. In `WAITING`, the receiver stops periodic PINGs.
-
-The iOS **lease** checks whether valid control messages still arrive from the receiver. If none arrives for `lease_ms`, iOS expires the session. PING/PONG does not extend the separate FRAME deadline or the iOS 10-second ACK wait. Every control except HELLO uses the adopted iOS session ID, and iOS checks both that ID and the sender address/TCP connection.
-
-Use STOP for an explicit receiver termination, not because retry attempts ran out. The receiver may also exit on Ctrl+C, `stop_event`, an explicitly set `duration` expiring, a fatal local error such as bind failure, or a callback failure. Preserve the original cause of a callback error. iOS's own Stop action, lifecycle changes, lost permissions, and purchase/trial restrictions still apply.
-
-The waiting behavior does not guarantee recovery from computer sleep, process termination by the OS, a disappearing network interface, or a blocked network/firewall.
-
-<a id="validation"></a>
-
-## 6. Validation and resource limits
-
-A receiver must check more than the message's type. Validate its declared lengths, sender/session, schema, and numeric data before passing a frame to the application. The following limits and rejection rules are part of this protocol, not optional debugging checks.
+- **Normal start**: connect to the iOS TCP port 49984, send HELLO on that connection right after connecting, receive SCHEMA, then FRAMEs. **No SCHEMA_ACK.** iOS closes a connection on which no complete HELLO arrives within 5 seconds (Facemotion3d closes a connection on which no HELLO arrives within 2 seconds of connecting). In iFacialMocap and iFacialMocapTr, this iOS port also accepts the v1/v2 TCP commands, and iOS tells them apart by the first bytes. A connection that starts with `FMV3` is v3, and its 5 seconds count from when iOS accepted the connection. A connection that sends a v1/v2 command is handled as v1/v2 and is not subject to this limit. A connection on which nothing arrives, or only the beginning of `FMV3` (such as `F`), is closed after 5 seconds.
+- **Manual start**: iOS connects to the receiver (PC) TCP port **49984** and sends SCHEMA, then FRAMEs, on that connection. Keep this listener open while a normal-start connection is running.
+- **Message boundaries**: read 40 bytes, check the header, then read `chunk_length` bytes. Repeat. A read can contain part of a message or several messages. TCP messages are never split (`part_count = 1`), and there is no extra length prefix.
+- **One connection, one session**: a session exists only on the connection that delivered its SCHEMA. A new connection starts with its own SCHEMA, even from the same address and port.
+- **Errors**: when the stream is malformed, close that connection and keep listening. Do not search for the next `FMV3`.
+- Recovery on a connection that stays open uses GET_SCHEMA only. PING is still sent every 3 s (for the reasons in [section 2](#udp)).
 
 <a id="limits"></a>
+## 7. Limits and validation
 
-### 6.1 Sizes, names, and incomplete messages
+Check each message before using it. For UDP, drop an invalid datagram. For TCP, close the connection.
 
-All payload sizes below **exclude the 40-byte common header**.
-
-| Payload | Limit |
+| Item | Rule |
 |---|---|
-| HELLO | Exactly 8 bytes |
-| SCHEMA | At most 262144 bytes, including the 20-byte start information |
-| Schema JSON | At most 262124 bytes |
-| FRAME | Exactly `N × integer_size + 48`; at most 16432 bytes (`4096 × 4 + 48`) |
-| ERROR | 1–512 bytes of valid UTF-8 |
-| GET_SCHEMA, PING, PONG, STOP, SCHEMA_ACK | 0 bytes |
+| Header | Magic `FMV3`, header size 40, type 1–9, nonzero `session_id`, field rules of [3.2](#header) |
+| HELLO body | Exactly 8 bytes |
+| SCHEMA body | 20–262144 bytes (JSON ≤ 262124) |
+| FRAME body | Exactly `N × 2` or `N × 4` + 48 bytes, at most 16432. All 12 floats finite |
+| ERROR body | 1–512 bytes, valid UTF-8 |
+| Other controls | 0 bytes |
+| JSON | No duplicate keys, no `NaN`/`Infinity`, rules of [3.4](#schema) (names: unique as code point sequences, without normalization; no U+0000–U+001F) |
+| Fragments | Up to 512 per message. Keep at most 8 incomplete messages and 524288 bytes. Drop an incomplete FRAME after 0.25 s and SCHEMA after 3 s |
+| New session | Normal start: `client_nonce` equals your HELLO, and `actual_fps` and `max_udp_size` are not above your request. Manual start: `client_nonce = 0`, and `actual_fps` (1–60) and `max_udp_size` (576–1200) may be any valid value; iOS never received your settings, so do not compare these values with your local options. Only one incomplete new session at a time (3 s) |
+| Old sessions | Ignore late messages of a session that was replaced (the sample remembers 32) |
 
-A schema has **0–4096** BlendShape names. Each is a unique, case-sensitive UTF-8 string of **1–255 bytes**, not an empty string. Reject characters U+0000–U+001F and invalid Unicode. These limits do not fix the list to the 52 standard names.
+A frame never skips validation, even when rendering is late.
 
-Require exactly the nine JSON keys defined in 3.4. Reject duplicate keys, missing or unknown keys, and nonstandard constants such as NaN. Require the specified app/profile, units, layout, and encoding. Head/eye values must be finite; reject NaN or infinity. Numeric payload length must match the schema.
+<a id="compat"></a>
+## 8. Compatibility
 
-| Incomplete data held by a receiver | Limit or expiration |
+**Revision 5** (this document) differs from revision 4 (beta builds before the first App Store release of v3):
+
+| | Revision 4 | Revision 5 |
+|---|---|---|
+| Message type numbers | HELLO 1, SCHEMA 3, SCHEMA_ACK 10 (2 unused) | **HELLO 1, SCHEMA 2, SCHEMA_ACK 3** (1–9 without a gap) |
+| `contract_revision` | 4 | **5** |
+| Receiver (PC) TCP port (manual start) | 49986 | **49984** |
+| Facemotion3d iOS ports | UDP 49993 (and 49983), TCP 49994 | **UDP 49983, TCP 49984 (same as iFacialMocap)** |
+| Unknown JSON keys / app names | rejected | **ignored / accepted** |
+
+Different revisions do not work together. Update both sides together.
+
+- A revision-5 app answers a revision-4 HELLO with `UNSUPPORTED_CONTRACT: requires 5`.
+- A revision-5 receiver (PC) rejects the SCHEMA (type 3) that a revision-4 app sends in a manual start, with a message saying it looks like a revision-4 app.
+- A revision-4 receiver (PC) ignores a revision-5 app's manual-start SCHEMA (type 2) as an unknown type. The app then reports an ACK timeout after 10 s.
+
+v3 is an additional protocol. The v1/v2 text protocols of the apps are unchanged, and a v1/v2 receiver cannot read v3.
+
+## Appendix: files in this repository
+
+| File | Use |
 |---|---|
-| Messages being reassembled | At most 8 |
-| Actual stored fragment bytes, combined | At most 524288 bytes |
-| Fragments in one message | At most 512 |
-| Incomplete FRAME | Discard after 250 ms |
-| Incomplete SCHEMA | Discard after 3 seconds |
-| Incomplete schema for a candidate new session | Only 1 candidate at a time; discard after 3 seconds |
-
-Apply the fixed fragment capacities in 3.8 when checking indexes, counts, lengths, and shared metadata. Matching duplicates may be ignored; conflicting fragments or metadata invalidate the assembly.
-
-<a id="session-validation"></a>
-
-### 6.2 Accepting a schema and a session
-
-Adopt the session ID and its schema together, **after** validating all fragments, start information, and JSON and successfully completing `on_schema`. A partial schema or an early FRAME cannot establish the session. Invalid input must not replace the current schema.
-
-For normal startup, the nonzero `client_nonce` in SCHEMA must match the receiver's HELLO for that startup. For manual startup, accept 0 only when manual receiving is permitted. Keep nonce validation for normal startup; do not remove it to support the manual case. Check the requested/permitted FPS and UDP size limits as well as lease and revision. A session's nonce, FPS cap, UDP size cap, lease, and revision remain unchanged throughout that session.
-
-A **new session** may be adopted only in `WAIT_SCHEMA` or `WAITING`. Reject another session trying to take over during `WAIT_FRAME`, `STREAMING`, or `RECOVERING`. In the reference receiver, `--host` restricts accepted input to the specified host's IP addresses; `--listen` without `--host` explicitly permits any sender on a trusted LAN. Reply to the actual source port on UDP. Once established, check the sender/session and, for TCP, the particular connection instance.
-
-After adopting a new session, discard old schema, fragment, and sequence state. Keep the **32 most recently replaced sender-address/session pairs** so old packets cannot restore a retired session. Only one incomplete candidate-session schema may be held at a time, for at most 3 seconds.
-
-None of these identifiers, the port choice, or manual nonce=0 authenticates a sender. Use a trusted LAN/VPN and do not expose these ports to the public Internet.
-
-<a id="sequence"></a>
-
-### 6.3 Late frames and unknown schemas
-
-FRAME's `sequence` is a UInt32 counter for the session. To compare a received value with the last accepted value, calculate:
-
-```text
-difference = (new - old) mod 2^32
-newer      = 1 <= difference <= 2^31 - 1
-```
-
-Reject duplicates, older/out-of-order frames, and a difference of exactly half the range. The comparison handles UInt32 wraparound. Gaps do not prove network loss: the sender may deliberately drop frames before transmission. A schema change does not reset the frame sequence.
-
-If a FRAME carries an unknown `schema_id`, discard it and request the schema using GET_SCHEMA at most once per second. Before an initial session ID is established, retry HELLO instead. If iOS no longer holds the requested schema, it returns the latest one. Do not let an old schema or ACK roll the current schema back, and do not request old FRAME retransmissions.
-
-<a id="invalid-data"></a>
-
-### 6.4 Reject malformed data
-
-Reject unsupported message types (including 2), unknown flag bits, a `header_size` other than 40, oversized declared lengths, and a payload whose type or length does not match its definition. Apply the schema, Unicode, finite-number, and session checks above before using the data.
-
-For malformed **UDP** data, discard the datagram or affected assembly. For a malformed **TCP** stream, close the affected connection and keep the receiver listener as specified in 5.5. Do not search for `FMV3` inside a corrupted stream and guess where a new message begins.
-
-A valid but stale message is subject to the session/schema/sequence rules; it must not change current state. In particular, a delayed rejection of an earlier HELLO is not an error for the established session. Validate ERROR payloads as UTF-8, including errors rejecting a pending HELLO.
-
-An application callback failure is not a retryable network error. Terminate with its original cause preserved; if `on_schema` fails, send no ACK.
-
-<a id="source-token"></a>
-
-### 6.5 ScrapingValue and source_token
-
-ScrapingValue is carried only as `source_token` in the **FRAME header**, not as a BlendShape name or a schema JSON field. Other message headers, including SCHEMA, have `source_token=0`. A token change takes effect on the next FRAME without changing the schema.
-
-The sender converts the fetched text as follows:
-
-1. Trim only ASCII space, tab, carriage return, and line feed (SP/TAB/CR/LF) from both ends.
-2. For an empty result or exactly lowercase `none`, use token 0.
-3. Otherwise, apply FNV-1a-32 to the UTF-8 bytes. Start with **2166136261** and, for each byte, calculate `h=((h XOR byte)*16777619) mod 2^32`.
-4. If the final hash is 0, replace that hash with 1.
-
-Compute and cache the result when the source value is initialized or updated. Do not fetch the web page or hash the text for every frame, and do not use Swift `hashValue`. Preserve the existing HTML/data-fetching method and successful-value caching behavior.
-
-A token of 0 does not prevent reception. This token is not authentication, encryption, or spoofing protection. Use the trusted-network restrictions in 6.2.
-
-<a id="ios-notes"></a>
-
-## Appendix A. Notes for maintaining the iOS sender
-
-This appendix applies to the iOS implementation. A developer building only a receiver does not need to modify these iOS internals. The compatibility and calculation requirements below remain part of implementing v3 in the existing apps.
-
-<a id="ios-compatibility"></a>
-
-### A.1 Keep existing network paths and settings
-
-Use the existing app receive endpoints, not additional dedicated v3 ports. Dispatch data beginning with `FMV3` to the v3 codec. Pass non-v3 data to the legacy handler, but do not reinterpret malformed v3 data as a legacy text command.
-
-| Existing path | Preserve it as follows |
-|---|---|
-| iFacialMocap's legacy TCP startup | The legacy string sent to UDP49983 still causes iOS to connect to the receiver's TCP49986. It remains separate from PC-initiated v3 TCP. |
-| iFacialMocap direct TCP | Share the existing TCP49984 listener used by `startListener()`. Do not change the separate 49985 listener or the 49987 recorded-data path. |
-| Facemotion3d UDP | Keep iOS's standard command listener on 49993. Receiver port 49983 follows the Other output's default and the official Python example. |
-| Facemotion3d's existing automatic-connection branch | Some existing code sends to receiver UDP49993. Do not change that legacy branch to 49983. A v3 receiver can explicitly use `--listen-port 49993` when appropriate. |
-| Facemotion3d compatibility listener | Keep the existing iOS UDP49983 compatibility listener; do not close or move it. |
-
-Use the user's selected destination for manual sending. Do not overwrite existing defaults or saved `sendPort` / `sendProtocol` settings with temporary v3 session information.
-
-Bulk recording transfer, FBX, audio-file transfer, body data, and DCC-specific bridges stay on their existing paths. Adding v3 does not add, remove, or replace Bluetooth functionality, nor allow taking over another client's active transfer.
-
-<a id="ios-calculations"></a>
-
-### A.2 Build stable schemas and preserve calculations
-
-Build and cache the schema order when settings change. Do not derive it by enumerating a dictionary on every frame. Include the standard fields, `FM_*` fields, and configured custom audio BlendShapes, rather than only the fields currently activated by speech.
-
-Inactive custom fields stay in the schema with a value of 0. If audio intentionally overrides a standard field, use that single field, not a duplicate name; when the override is inactive, preserve its underlying value. Diagnose unintended duplicate names from remapping and do not transmit an ambiguous schema.
-
-Reuse the existing `Int(weight * 100)` / `blendShapePercent` rounding results. Do not independently change calculation order or precision. Send head/eye values after the existing axes, scaling, calibration, and mirroring operations, preserving the profile's meaning. Do not convert them to a new common coordinate system or transmit extra internal head values.
-
-<a id="ios-conditions"></a>
-
-### A.3 Apply the existing usage conditions
-
-Before accepting normal or manual startup, iOS checks purchase/license status, usage-time limits, foreground requirements, permissions, and conflicts with other transfers. v3 must not bypass these restrictions.
-
-Keep face processing and display updates active during schema ACK waits, retaining only the latest outgoing values. If an ACK wait expires, end the unconfirmed send attempt; for manual startup, tell the user that receipt could not be confirmed. A later manual start uses a new session ID.
-
-Retries, re-ACKs, GET_SCHEMA, and repeated HELLO must not reset purchase/trial start times, frame numbers, or usage limits. Stop on the earliest applicable ACK, lease, or usage deadline. Preserve existing stopping behavior for iOS lifecycle events, lost permissions, and the app's Stop button.
-
-<a id="python-notes"></a>
-
-## Appendix B. Using the reference files
-
-`face_motion_v3.py` is the reference receiver. `simulate_ios_v3.py` produces synthetic data for tests without an iPhone; its sender-side ACK/retry logic is in `SchemaDelivery`. The simulator is not a complete production iOS implementation. Read [Appendix C](#known-issues) before using either file as a model for another implementation.
-
-The wire names and Python API names are not always identical:
-
-| In this specification | In the reference Python |
-|---|---|
-| `message_type` | `Packet.kind` |
-| `total_payload_length` | `Packet.total_length` |
-| One packet's `chunk_length` | Byte length of that packet's `Packet.payload` |
-
-`V3Client` permits manual receive waiting. The lower-level `ReceiverCore` accepts the manual nonce 0 only when `allow_push=True` is explicitly selected.
-
-| Receiver option | Meaning |
-|---|---|
-| `--app ifacialmocap` / `--app facemotion3d` | Select app-specific defaults; iFacialMocap is the default. Tr uses iFacialMocap's defaults. |
-| `--transport udp` / `--transport tcp` | Select the transport. |
-| `--port` | Override the destination port on iOS or the simulator. |
-| `--listen-port` | Override the receiver's local listening port. |
-| `--host` / `--listen` | Initiate normal startup toward the host, or wait for manual startup. Host filtering still applies when a host is specified. |
-| `--bind` | Select the local bind address and one address family. IPv4 is the default; `--bind ::` selects IPv6. |
-| `--no-reconnect` | Accepted for compatibility. With or without this option, automatic attempts are bounded and passive listening remains available. |
-
-See [README.md](README.md) for commands and application integration. Real-device testing on Windows, macOS, and IPv6 remains separately necessary.
-
-[Transmit diagram](diagrams/FMV3_PC_to_iOS_EN.png) · [Receive diagram](diagrams/FMV3_iOS_to_PC_EN.png) · [Diagram text](diagrams/DIAGRAM_TEXT_EN.md) · [Expected byte vectors](golden_vectors.json)
-
-The diagram row `HELLO=1 / SCHEMA=3 / FRAME=4` gives examples, not every message type and not handshake order. SCHEMA_ACK is 10. Likewise, “HELLO only: PC client_nonce” describes PC-to-iOS messages; across both directions, a pending-HELLO rejection ERROR also uses that nonce. Use Section 3 for the complete definitions.
-
-The diagrams and byte vectors are reference material, not runtime dependencies. The small sample distribution does not include the maintainer's full automated test suite.
-
-<a id="known-issues"></a>
-
-## Appendix C. Known differences in the reviewed Python snapshot
-
-**This appendix records code behavior, not alternative protocol rules.** The findings were reported in the 2026-09-22 review. They apply to the files identified below, not necessarily to later GitHub revisions or production iOS builds. This document-only rewrite does not modify the code.
-
-| Reviewed file | SHA-256 |
-|---|---|
-| `face_motion_v3.py` | `d68b145ddf7307f79146cf2d1b93f691246c215a329e89593d73c766dfd0f432` |
-| `simulate_ios_v3.py` | `b4d73d14b532470820eace853c5347d059c3a6698bd3e23e40c959dff45ce9f4` |
-
-<a id="known-error-utf8"></a>
-
-### C.1 Pending-HELLO ERROR accepts malformed UTF-8
-
-In `V3Client._handle()`, an otherwise matching ERROR for a pending HELLO uses `decode('utf-8', 'replace')`. Malformed bytes are displayed as replacement characters and move the receiver to `WAITING`. The established-session path in `ReceiverCore.accept()` rejects malformed UTF-8 instead. An ERROR payload containing byte `FF` reproduced the difference.
-
-**Required behavior:** Validate ERROR as UTF-8 in both cases, following 3.7 and 6.4. The permissive branch is not a rule to copy. The separate, already-fixed handling of delayed errors for an earlier HELLO had been regression-tested in the prior review.
-
-<a id="known-token-cache"></a>
-
-### C.2 The simulator hashes source_token on every frame
-
-The simulator's FRAME loop calls `source_token("hapihapi")` for each generated frame. The transmitted value is correct, but the code does not demonstrate the required caching optimization.
-
-**Required behavior:** As in 6.5, a production sender computes the token when the source value is initialized or updated, then reuses it. Do not copy per-frame hashing into the production send loop.
-
-<a id="known-hello-timeout"></a>
-
-### C.3 The simulator does not enforce the HELLO deadline
-
-The simulator's TCP accept loop leaves a connection open even when HELLO has not arrived after 5 seconds, and accepts a later HELLO.
-
-**Required behavior:** In normal TCP startup, iOS closes a connection if no complete HELLO arrives within 5 seconds of accepting it. This is the sender-side deadline in 5.2, not the receiver-side initial-SCHEMA deadline in the next issue.
-
-<a id="known-tcp-reconnect"></a>
-
-### C.4 A new TCP connection can reuse old session state
-
-After a manual TCP connection received SCHEMA and FRAME and then disconnected, a new connection using the same source IP/port could be treated as the old session. The earlier review observed two results:
-
-- With no initial SCHEMA on the new connection, it stayed open for about **5.55 seconds** and accepted a later schema, instead of enforcing the 5-second deadline.
-- An old-session FRAME with the previous session/schema IDs and a newer sequence was accepted **before any SCHEMA on the new connection**, returning the receiver to `STREAMING`.
-
-The socket and TCP framing buffer were replaced, but `core.session_id` and `_peer` remained. The deadline and current-session checks did not adequately distinguish the new connection. The review forced source-port reuse on Linux; it did not measure how often this occurs in normal use or establish its effect on production iOS builds.
-
-**Required behavior:** Implement connection-specific initial-SCHEMA validation and the deadline in [5.6](#tcp-reconnect). Retained state must not authorize old-session FRAMEs on a new, unvalidated connection. This is a receiver defect, not permission to skip SCHEMA. It does not prohibit resumption over the same TCP connection that remained open.
-
-A successful exchange with the simulator is not proof that all production requirements are satisfied. App lifecycle, purchase restrictions, and real-device networking still require separate validation.
-
-<a id="history-and-tests"></a>
-
-## Appendix D. Design history and implementation checks
-
-The history explains existing assignments. It does not add another startup mode or authorize an older wire format. The checks are for implementers and maintainers, not a report that every check has been run on a particular product.
-
-<a id="history"></a>
-
-### D.1 Why message type 2 is unused
-
-An earlier v3 draft assigned type 2 to **WELCOME**, an iOS-to-receiver message accepting a startup request. That separate response was removed, and its start information was merged into SCHEMA. The other message IDs were retained. SCHEMA_ACK kept ID 10, and 2 was left unused rather than assigned a different meaning.
-
-WELCOME and SCHEMA_ACK have different purposes and directions: the former accepted a request on the iOS side; the latter confirms that the receiver has validated and stored a schema. In `contract_revision = 4`, do not implement WELCOME or send/accept type 2.
-
-“Reserved” here means **unused and prohibited**, not freely available for a custom message or promised for a future feature. The gap adds no byte, padding, empty packet, wait step, or buffer slot. It does not ban the number 2 in other fields that permit it. This history belongs to v3 design, not to v1/v2 text protocols or app version numbers; leaving the ID unused does not add compatibility with the older draft.
-
-<a id="acceptance-tests"></a>
-
-### D.2 Required implementation checks
-
-| Area | Check |
-|---|---|
-| Type IDs and wire layout | ACK is 40 bytes with no payload and byte offset 4 equals `0x0A`. Reject `0x02`, unsupported types, and revisions other than 4. Do not add reserved padding or handshake messages. |
-| Initial UDP startup | HELLO leads to SCHEMA. No FRAME is sent before a valid current-schema ACK. A receiver does not ACK a partial or invalid schema. |
-| Missing SCHEMA or ACK | Lose all or part of SCHEMA, then separately lose only the first ACK. Both cases recover through schema retransmission and acknowledgement. |
-| Schema changes | Test additions, removals, renames/reordering, i16→i32, another change while awaiting ACK, duplicate SCHEMA/ACK, and delayed old FRAMEs. Wrong-schema, wrong-session, or wrong-sender ACKs must not resume sending. Resume with the latest values only. |
-| Sender deadlines | PING, repeated HELLO, and repeated settings changes do not extend the 10-second ACK deadline. Normal TCP's incomplete HELLO connection closes after 5 seconds. |
-| Receiver monitoring | Test no FRAME after ACK, interrupted FRAMEs, schema-update waits, and SCHEMA-only traffic. Even if only PONGs continue for more than 35 seconds, the receiver has entered WAITING after bounded recovery; PONGs must not keep FRAME monitoring alive. |
-| Waiting and manual restart | Retain the UDP port and TCP listener. Stop timer-driven requests/PING and do not send STOP merely for waiting. Re-ACK valid saved/new manual schemas; resume on valid FRAME. Test `--listen` with no HELLO on both transports. |
-| TCP startup and reconnection | Normal startup is HELLO→SCHEMA→FRAME without SCHEMA_ACK. After disconnect, test a new connection using the same source IP/port: enforce its own 5-second initial-SCHEMA deadline; never forward an old-session FRAME before its SCHEMA. Verify that a valid new manual SCHEMA/session then FRAME works. |
-| Session and error checks | Reject wrong IP/nonce, retired sessions, and takeover of a running stream. Handle matching pending-HELLO ERRORs but ignore delayed errors for an earlier HELLO after a session is adopted. Validate UTF-8. |
-| Application callbacks | If `on_schema` fails, send no ACK and terminate with the original error. |
-| Values and app behavior | Test negative values, values above 100, Unicode, type boundaries, head/eye scaling, mirroring, playback, tracking loss, stop/reconnect, purchase limits, and regressions in legacy v1/v2 paths. |
-
-Use `golden_vectors.json` for byte comparisons and the README's two-terminal procedure for a basic simulated exchange. The maintainer's full test suite is not included in the small distribution. Completing iOS implementation also requires an Xcode build and real-device UDP/TCP interoperability testing for both app families. Do not report unperformed checks as successful.
-
-<a id="references"></a>
-
-### D.3 General references
-
-These references explain general mechanisms. The FMV3-specific fields, numbers, and behavior are defined in this document.
-
-[Python struct](https://docs.python.org/3/library/struct.html) · [Python Socket HOWTO](https://docs.python.org/3/howto/sockets.html) · [UDP Usage Guidelines — RFC 8085](https://www.rfc-editor.org/rfc/rfc8085.html) · [TCP — RFC 9293](https://www.rfc-editor.org/rfc/rfc9293.html)
+| `face_motion_v3.py` | Reference receiver (UDP and TCP) and codec |
+| `simulate_ios_v3.py` | Synthetic iOS sender for tests without a phone; not the real app |
+| `golden_vectors.json` | Expected bytes for HELLO, SCHEMA_ACK, controls, SCHEMA and FRAME (UDP and TCP) |
+| `diagrams/fmv3_flow.svg`, `diagrams/fmv3_messages.svg` | Overview pictures of the flows and the byte layout; this document is the definition |
+
+Names in the Python sample: `Packet.kind` = `message_type`, `Packet.total_length` = `total_payload_length`, `len(Packet.payload)` = `chunk_length`.
