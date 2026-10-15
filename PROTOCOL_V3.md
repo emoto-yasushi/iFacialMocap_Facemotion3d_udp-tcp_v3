@@ -67,7 +67,7 @@ A random nonzero 64-bit value the receiver (PC) picks for each normal start. "No
 ### 1.3 What a FRAME contains
 
 - **BlendShape values**: signed integers (i16 or i32); in variable mode one per name of the SCHEMA, in the same order, and in fixed52 mode in the order of the table in [Appendix C](#fixed52-names). The unit is *percent*: `25` means 0.25, `-25` means −0.25 and `150` means 1.5. Values below 0 and above 100 are valid. Do not clamp them to 0–100.
-- **Head**: rotation x, y, z in degrees and position x, y, z in meters (after the app's own scaling, axis settings and calibration).
+- **Head**: rotation x, y, z in degrees and position x, y, z in meters (both after the app's own scaling, axis settings and calibration).
 - **Right eye** and **left eye**: rotation x, y, z in degrees.
 - **State**: whether the face is tracked (tracking; also during playback, whether the camera tracks the face now) and whether a recording is being played back (playback), in the header's `flags` ([3.2](#header)).
 
@@ -141,7 +141,7 @@ UDP has no "connection". If the receiver (PC) program quits or the PC leaves the
 
 </details>
 
-**When iOS refuses to start.** When iOS refuses a HELLO, it answers with ERROR instead of SCHEMA. Show the received text to the user (full list of reasons in [3.8](#error)).
+**When iOS refuses to start.** When iOS refuses a HELLO, it answers with ERROR instead of SCHEMA. Show the received text to the user (main reasons in [3.8](#error)).
 
 <details>
 <summary>Details: main reasons for a refusal, and v1/v2 streaming</summary>
@@ -656,7 +656,7 @@ All times are defaults in seconds. "Valid" means a message that passed every che
 - **Recovery** = send SCHEMA_ACK for the stored table again (UDP only) and send GET_SCHEMA with `schema_id = 0`.
 - The FRAME timer starts when the first SCHEMA is stored and restarts with every new valid FRAME. SCHEMA and PONG do **not** restart it. A frame with the face lost still counts.
 - **WAITING** is not an exit. Keep the port open and keep reading. Send nothing on a timer (no HELLO, PING, GET_SCHEMA or reconnect). Answer a valid SCHEMA with SCHEMA_ACK. A valid FRAME returns to streaming. A manual start from iOS can begin a new session.
-- While a session is streaming, a SCHEMA from another session is ignored: nobody can take over a running stream.
+- While a session is streaming, a SCHEMA from another session is ignored: nobody can take over a running stream, not even a new session from the same sender.
 
 <details>
 <summary>Details: which SCHEMA_ACK counts for lease_ms, and what the reference receiver does</summary>
@@ -741,8 +741,6 @@ A frame is never accepted without validation, even when rendering is late.
 
 **Revision 6** requires both the receiver (PC) and the iOS app to support revision 6. Revision 5 and revision 6 do not work together, and iOS never switches back to the revision-5 format (JSON). Retries do not help, so update both sides together. Revisions 4 and 5 were used only by beta builds before the first App Store release of v3. The changes in each revision, and what happens when revision 5 and revision 6 are mixed, are in the [CHANGELOG](CHANGELOG.md#english). For the supported app versions, see section 5 of the [README](README.md).
 
-The answer key `golden_vectors.h` / `golden_vectors.c` (the expected bytes in C99, [Appendix A](#examples)) is optional material for development and is never sent. No JSON is ever sent over the network.
-
 v3 is an additional protocol. The v1/v2 text protocols of the apps are unchanged, and a v1/v2 receiver program cannot read v3.
 
 <a id="examples"></a>
@@ -760,9 +758,9 @@ All bytes are values from the answer key `golden_vectors.c` (each example first 
 | `table.layout` | The SCHEMA body from the descriptor on. In a FRAME vector, the table to read that FRAME with |
 | `udp`, `udp_count` | The datagrams sent over UDP, in order, each with its length |
 | `message` | The whole message in one piece (as sent over TCP; SCHEMA_ACK is sent only over UDP) |
-| `table.names`, `values`, `pose_bits` | Names as UTF-8 bytes with a length, values, and the head and eye values as Float32 bit patterns |
+| `table.names`, `values`, `pose_bits` | Names (the UTF-8 bytes and their length, without the length byte sent on the wire), values, and the head and eye values as Float32 bit patterns |
 
-`golden_vectors_check.c` decodes every vector with little-endian reads and compares it with these fields, then encodes it again and compares the bytes with `memcmp`. It needs only a C99 compiler, no network and no other library: `cc -std=c99 -o golden_vectors_check golden_vectors.c golden_vectors_check.c && ./golden_vectors_check`.
+`golden_vectors_check.c` decodes every vector with little-endian reads and compares it with the expected values, then encodes it again and compares the bytes with `memcmp`. It needs only a C99 compiler, no network and no other library: `cc -std=c99 -o golden_vectors_check golden_vectors.c golden_vectors_check.c && ./golden_vectors_check`.
 
 </details>
 
@@ -863,7 +861,7 @@ Next is a FRAME read with this table (3 names, i16) (`i16_manual`, 94 bytes in t
 |---|---|
 | `face_motion_v3.py` | Reference receiver (UDP and TCP) and encoder/decoder |
 | `simulate_ios_v3.py` | Simulated iOS sender for tests without a phone; not the real app |
-| `golden_vectors.h`, `golden_vectors.c`, `golden_vectors_check.c` | The answer key in C99: expected bytes for HELLO, SCHEMA_ACK, control messages, SCHEMA and FRAME (UDP and TCP), and a program that checks them ([Appendix A](#examples)). Optional, for development; never sent |
+| `golden_vectors.h`, `golden_vectors.c`, `golden_vectors_check.c` | The answer key in C99: expected bytes for HELLO, SCHEMA_ACK, control messages, SCHEMA and FRAME (UDP and TCP), and a program that checks them ([Appendix A](#examples)). Optional, for development |
 | `diagrams/fmv3_flow.svg`, `diagrams/fmv3_messages.svg` | Overview pictures of the connection flow and the byte layout; this document is the definition |
 
 Names in the Python sample: `Packet.kind` = `message_type`, `Packet.total_length` = `total_payload_length`, `len(Packet.payload)` = `chunk_length`. What the sample returns in fixed52 mode (the mode name, empty `app` and `profile`, the standard 52 names) is in section 6 of the [README](README.md).

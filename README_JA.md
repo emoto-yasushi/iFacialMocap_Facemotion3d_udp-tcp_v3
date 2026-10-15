@@ -205,7 +205,7 @@ v3は、組み込み機器で描画より文字列解析にCPU時間を使って
 
 </details>
 
-**組み込み機器での受信。** 可変モードでは、名前の一覧の保存と、分割されて届くSCHEMAの組み立てが必要です。固定52ではどちらも不要で、SCHEMAは合計66バイト、FRAMEは合計296バイトです。どちらも分割されずに1回で届きます。固定52のFRAMEは、60fpsで毎秒17,760バイトです（制御メッセージとネットワークのヘッダーを除く計算値）。どちらのモードでも、検証、UDPのSCHEMA_ACK、PINGは必要です。CPUとメモリは実機で測ってください。Pythonのファイルは参照実装とテスト用の道具です。C、C++など任意の言語で[仕様書](PROTOCOL_V3_JA.md)を実装してください。バイト列は、C99で書いた正解データ（`golden_vectors.h`・`golden_vectors.c`。開発時に任意で使う資料で、通信では送りません）で確認できます。必要なのはCコンパイラーだけで、JSONやPythonは要りません：`cc -std=c99 -o golden_vectors_check golden_vectors.c golden_vectors_check.c && ./golden_vectors_check`
+**組み込み機器での受信。** 可変モードでは、名前の一覧の保存と、分割されて届くSCHEMAの組み立てが必要です。固定52ではどちらも不要で、SCHEMAは合計66バイト、FRAMEは合計296バイトです。どちらも分割されずに1回で届きます。固定52のFRAMEは、60fpsで毎秒17,760バイトです（制御メッセージとネットワークのヘッダーを除く計算値）。どちらのモードでも、検証、UDPのSCHEMA_ACK、PINGは必要です。CPUとメモリは実機で測ってください。Pythonのファイルは参照実装とテスト用の道具です。C、C++など任意の言語で[仕様書](PROTOCOL_V3_JA.md)を実装してください。バイト列は、C99で書いた正解データ（`golden_vectors.h`・`golden_vectors.c`）を自分のプログラムと一緒にコンパイルして確認できます。`golden_vectors_check.c`はその例で、必要なのはCコンパイラーだけです：`cc -std=c99 -o golden_vectors_check golden_vectors.c golden_vectors_check.c && ./golden_vectors_check`
 
 v3は追加の選択肢です。動いているv1/v2の連携を変える必要はありません。
 

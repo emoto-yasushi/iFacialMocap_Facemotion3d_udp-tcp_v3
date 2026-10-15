@@ -1,7 +1,7 @@
 /* FMV3 contract revision 6: the answer key (expected bytes) in C99.
  *
- * Optional material for developing an FMV3 sender or receiver. These files are never sent
- * over the network, and they need no JSON, no Python and no other library.
+ * Optional material for developing an FMV3 sender or receiver. It needs only a C99
+ * compiler and the C standard library.
  * Build and run the check (exit status 0: every vector matches):
  *
  *     cc -std=c99 -o golden_vectors_check golden_vectors.c golden_vectors_check.c

@@ -1,5 +1,6 @@
 /* FMV3 contract revision 6: the answer key in C99. Types and use: golden_vectors.h.
- * Each array lists its bytes 8 per line, after the position of the first one.
+ * Byte arrays list 8 bytes per line, after the position of the first one; name arrays
+ * list one name per line.
  * Generated file: do not edit. */
 #include "golden_vectors.h"
 
@@ -3441,7 +3442,7 @@ static const fmv3_bytes manual_facemotion3d_fragmented_names[302] = {
     /* 301 */ { manual_facemotion3d_fragmented_names_bytes + 2896, 10 },
 };
 
-/* ---- fixed52_manual: SCHEMA, manual start, fixed52, i32, 52 names, 1 UDP datagram(s) ---- */
+/* ---- fixed52_manual: SCHEMA, manual start, fixed52, i32, blend_count 52 (no names), 1 UDP datagram(s) ---- */
 static const uint8_t fixed52_manual_message[66] = {
     /*    0 */ 0x46, 0x4d, 0x56, 0x33, 0x02, 0x00, 0x28, 0x00,
     /*    8 */ 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
