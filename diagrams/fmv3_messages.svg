@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="820" viewBox="0 0 1240 820">
-<rect width="1240" height="820" fill="#ffffff"/>
-<text x="24" y="40" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="24" font-weight="700" fill="#1f2937" text-anchor="start">Face Motion v3 — message layout (contract revision 5)</text>
-<text x="24" y="66" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="normal" fill="#4b5563" text-anchor="start">Little-endian, no padding. Offset · size. Every message = 40-byte header + payload.</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="1010" viewBox="0 0 1240 1010">
+<rect width="1240" height="1010" fill="#ffffff"/>
+<text x="24" y="40" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="24" font-weight="700" fill="#1f2937" text-anchor="start">Face Motion v3 — message layout (contract revision 6)</text>
+<text x="24" y="66" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="normal" fill="#4b5563" text-anchor="start">Little-endian, no padding. Box text: offset · size or type. Every message = 40-byte header + payload. No JSON on the wire.</text>
 <text x="24" y="100" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#1f2937" text-anchor="start">Common header (40 bytes)   Python: struct &quot;&lt;4sBBHQIIIIHHI&quot;</text>
 <rect x="24" y="110" width="84" height="62" fill="#f3f4f6" stroke="#9ca3af"/>
 <text x="66.0" y="135" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">magic</text>
@@ -40,57 +40,75 @@
 <text x="1156.0" y="135" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">chunk_length</text>
 <text x="1156.0" y="156" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">36 · 4 B</text>
 <text x="24" y="200" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#1f2937" text-anchor="start">Message types:  1 HELLO  ·  2 SCHEMA  ·  3 SCHEMA_ACK  ·  4 FRAME  ·  5 GET_SCHEMA  ·  6 PING  ·  7 PONG  ·  8 STOP  ·  9 ERROR</text>
-<text x="24" y="222" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#4b5563" text-anchor="start">flags (FRAME only): bit 0 tracking, bit 1 playback.  HELLO and a HELLO refusal ERROR carry client_nonce in session_id.</text>
-<text x="24" y="266" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#1f2937" text-anchor="start">HELLO [1] payload &quot;&lt;HHI&quot; — 8 bytes (48 in total)</text>
-<rect x="24" y="276" width="170" height="62" fill="#d1fae5" stroke="#9ca3af"/>
-<text x="109.0" y="301" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">requested_fps</text>
-<text x="109.0" y="322" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">UInt16 · 1–60</text>
-<rect x="194" y="276" width="170" height="62" fill="#d1fae5" stroke="#9ca3af"/>
-<text x="279.0" y="301" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">max_udp_size</text>
-<text x="279.0" y="322" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">UInt16 · 576–1200</text>
-<rect x="364" y="276" width="200" height="62" fill="#fef3c7" stroke="#9ca3af"/>
-<text x="464.0" y="301" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">contract_revision</text>
-<text x="464.0" y="322" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">UInt32 · 5</text>
-<text x="640" y="266" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#1f2937" text-anchor="start">SCHEMA_ACK [3] — 40 bytes, UDP only</text>
-<rect x="640" y="276" width="560" height="62" fill="#fef3c7" stroke="#9ca3af"/>
-<text x="920.0" y="301" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">header only, type 3</text>
-<text x="920.0" y="322" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">session_id and schema_id of the stored SCHEMA</text>
-<text x="24" y="390" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#1f2937" text-anchor="start">SCHEMA [2] payload — 20-byte start information &quot;&lt;QHHII&quot; + JSON</text>
-<rect x="24" y="400" width="196" height="62" fill="#dbeafe" stroke="#9ca3af"/>
-<text x="122.0" y="425" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">client_nonce</text>
-<text x="122.0" y="446" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">UInt64 · from HELLO / 0 = manual</text>
-<rect x="220" y="400" width="120" height="62" fill="#d1fae5" stroke="#9ca3af"/>
-<text x="280.0" y="425" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">actual_fps</text>
-<text x="280.0" y="446" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">UInt16</text>
-<rect x="340" y="400" width="130" height="62" fill="#d1fae5" stroke="#9ca3af"/>
-<text x="405.0" y="425" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">max_udp_size</text>
-<text x="405.0" y="446" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">UInt16</text>
-<rect x="470" y="400" width="120" height="62" fill="#d1fae5" stroke="#9ca3af"/>
-<text x="530.0" y="425" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">lease_ms</text>
-<text x="530.0" y="446" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">UInt32 · 10000</text>
-<rect x="590" y="400" width="160" height="62" fill="#fef3c7" stroke="#9ca3af"/>
-<text x="670.0" y="425" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">contract_revision</text>
-<text x="670.0" y="446" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">UInt32 · 5</text>
-<rect x="750" y="400" width="450" height="62" fill="#f3f4f6" stroke="#9ca3af"/>
-<text x="975.0" y="425" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">JSON (UTF-8)</text>
-<text x="975.0" y="446" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">blend_names, blend_encoding (i16 / i32), units, app, …</text>
-<text x="24" y="490" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#4b5563" text-anchor="start">UDP: SCHEMA is split into datagrams of at most 576 bytes; the start information appears once, at the start of the joined payload. Unknown JSON keys are ignored.</text>
-<text x="24" y="536" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#1f2937" text-anchor="start">FRAME [4] payload — N = number of blend_names (not fixed at 52)</text>
-<rect x="24" y="546" width="560" height="62" fill="#dbeafe" stroke="#9ca3af"/>
-<text x="304.0" y="571" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">N BlendShape integers</text>
-<text x="304.0" y="592" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">schema order · i16: 2N B · i32: 4N B · percent (-25 = -0.25)</text>
-<rect x="584" y="546" width="300" height="62" fill="#d1fae5" stroke="#9ca3af"/>
-<text x="734.0" y="571" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">head · 24 B</text>
-<text x="734.0" y="592" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">rx ry rz (deg) px py pz (m) · 6 × Float32</text>
-<rect x="884" y="546" width="156" height="62" fill="#d1fae5" stroke="#9ca3af"/>
-<text x="962.0" y="571" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">right eye · 12 B</text>
-<text x="962.0" y="592" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">rx ry rz · 3 × Float32</text>
-<rect x="1040" y="546" width="160" height="62" fill="#d1fae5" stroke="#9ca3af"/>
-<text x="1120.0" y="571" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">left eye · 12 B</text>
-<text x="1120.0" y="592" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">rx ry rz · 3 × Float32</text>
-<text x="24" y="636" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#4b5563" text-anchor="start">Head + eyes = 12 × Float32 = 48 bytes (&quot;&lt;12f&quot;).  Example: 52 names as i16 → 40 + 104 + 48 = 192 bytes per FRAME.</text>
-<text x="24" y="656" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#4b5563" text-anchor="start">sequence counts frames; skip duplicates and older frames.</text>
-<rect x="24" y="690" width="1192" height="44" fill="#f3f4f6" stroke="#9ca3af"/>
-<text x="620.0" y="715" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">GET_SCHEMA [5] · PING [6] · PONG [7] · STOP [8]: header only.   ERROR [9]: 1–512 bytes of UTF-8 text.</text>
-<text x="24" y="790" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#4b5563" text-anchor="start">PROTOCOL_V3.md is the definition; golden_vectors.json has the exact bytes.</text>
+<text x="24" y="222" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#4b5563" text-anchor="start">flags (FRAME only): bit 0 tracking, bit 1 playback. HELLO and a HELLO refusal ERROR carry client_nonce in session_id.</text>
+<text x="24" y="266" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#1f2937" text-anchor="start">HELLO [1] payload &quot;&lt;HHIH&quot; — 10 bytes (50 in total)</text>
+<rect x="24" y="276" width="150" height="62" fill="#d1fae5" stroke="#9ca3af"/>
+<text x="99.0" y="301" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">requested_fps</text>
+<text x="99.0" y="322" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">0 · UInt16 · 1–60</text>
+<rect x="174" y="276" width="160" height="62" fill="#d1fae5" stroke="#9ca3af"/>
+<text x="254.0" y="301" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">max_udp_size</text>
+<text x="254.0" y="322" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">2 · UInt16 · 576–1200</text>
+<rect x="334" y="276" width="200" height="62" fill="#fef3c7" stroke="#9ca3af"/>
+<text x="434.0" y="301" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">contract_revision</text>
+<text x="434.0" y="322" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">4 · UInt32 · 6</text>
+<rect x="534" y="276" width="220" height="62" fill="#fef3c7" stroke="#9ca3af"/>
+<text x="644.0" y="301" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">requested_mode</text>
+<text x="644.0" y="322" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">8 · UInt16 · 0 variable / 1 fixed52</text>
+<text x="790" y="266" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#1f2937" text-anchor="start">SCHEMA_ACK [3] — 40 bytes, UDP only</text>
+<rect x="790" y="276" width="426" height="62" fill="#fef3c7" stroke="#9ca3af"/>
+<text x="1003.0" y="301" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">header only, type 3</text>
+<text x="1003.0" y="322" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">session_id and schema_id of the stored SCHEMA</text>
+<text x="24" y="390" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#1f2937" text-anchor="start">SCHEMA [2] payload — 20-byte start information &quot;&lt;QHHII&quot;, then the descriptor below</text>
+<rect x="24" y="400" width="220" height="62" fill="#dbeafe" stroke="#9ca3af"/>
+<text x="134.0" y="425" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">client_nonce</text>
+<text x="134.0" y="446" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">0 · UInt64 · from HELLO / 0 = manual</text>
+<rect x="244" y="400" width="170" height="62" fill="#d1fae5" stroke="#9ca3af"/>
+<text x="329.0" y="425" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">actual_fps</text>
+<text x="329.0" y="446" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">8 · UInt16</text>
+<rect x="414" y="400" width="180" height="62" fill="#d1fae5" stroke="#9ca3af"/>
+<text x="504.0" y="425" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">max_udp_size</text>
+<text x="504.0" y="446" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">10 · UInt16</text>
+<rect x="594" y="400" width="180" height="62" fill="#d1fae5" stroke="#9ca3af"/>
+<text x="684.0" y="425" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">lease_ms</text>
+<text x="684.0" y="446" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">12 · UInt32 · 10000</text>
+<rect x="774" y="400" width="210" height="62" fill="#fef3c7" stroke="#9ca3af"/>
+<text x="879.0" y="425" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">contract_revision</text>
+<text x="879.0" y="446" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">16 · UInt32 · 6</text>
+<text x="24" y="504" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#1f2937" text-anchor="start">Descriptor &quot;&lt;HBBH&quot; — 6 bytes, both modes; fixed52 SCHEMA ends here (26 payload / 66 total)</text>
+<rect x="24" y="514" width="180" height="62" fill="#fef3c7" stroke="#9ca3af"/>
+<text x="114.0" y="539" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">mode</text>
+<text x="114.0" y="560" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">20 · UInt16 · 0 / 1</text>
+<rect x="204" y="514" width="180" height="62" fill="#dbeafe" stroke="#9ca3af"/>
+<text x="294.0" y="539" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">blend_encoding</text>
+<text x="294.0" y="560" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">22 · UInt8 · 1 i16 / 2 i32</text>
+<rect x="384" y="514" width="230" height="62" fill="#f3f4f6" stroke="#9ca3af"/>
+<text x="499.0" y="539" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">schema_format_version</text>
+<text x="499.0" y="560" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">23 · UInt8 · 1</text>
+<rect x="614" y="514" width="180" height="62" fill="#dbeafe" stroke="#9ca3af"/>
+<text x="704.0" y="539" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">blend_count</text>
+<text x="704.0" y="560" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">24 · UInt16 · 0–4096 / 52</text>
+<rect x="794" y="514" width="422" height="62" fill="#f3f4f6" stroke="#9ca3af"/>
+<text x="1005.0" y="539" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">variable-mode strings only</text>
+<text x="1005.0" y="560" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">app/profile: UInt16 length; names: UInt8 length</text>
+<text x="24" y="605" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#4b5563" text-anchor="start">Variable-mode strings: length, then UTF-8 bytes; the last name ends exactly at the end of the payload. UDP SCHEMA parts ≤ 576 B; fixed52 uses one part.</text>
+<text x="24" y="627" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#4b5563" text-anchor="start">Fixed52: mode 1, blend_encoding 2 (i32), blend_count 52, schema_id 1. No names or app/profile strings; no schema or mode change within the session.</text>
+<text x="24" y="676" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#1f2937" text-anchor="start">FRAME [4] payload — N = blend_count (variable) or 52 (fixed52)</text>
+<rect x="24" y="686" width="560" height="62" fill="#dbeafe" stroke="#9ca3af"/>
+<text x="304.0" y="711" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">N BlendShape integers</text>
+<text x="304.0" y="732" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">variable: i16 2N B / i32 4N B · fixed52: 52 × Int32 = 208 B · percent (-25 = -0.25)</text>
+<rect x="584" y="686" width="300" height="62" fill="#d1fae5" stroke="#9ca3af"/>
+<text x="734.0" y="711" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">head · 24 B</text>
+<text x="734.0" y="732" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">rx ry rz (deg) px py pz (m) · 6 × Float32</text>
+<rect x="884" y="686" width="156" height="62" fill="#d1fae5" stroke="#9ca3af"/>
+<text x="962.0" y="711" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">right eye · 12 B</text>
+<text x="962.0" y="732" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">rx ry rz · 3 × Float32</text>
+<rect x="1040" y="686" width="160" height="62" fill="#d1fae5" stroke="#9ca3af"/>
+<text x="1120.0" y="711" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">left eye · 12 B</text>
+<text x="1120.0" y="732" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="normal" fill="#4b5563" text-anchor="middle">rx ry rz · 3 × Float32</text>
+<text x="24" y="776" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#4b5563" text-anchor="start">Head + eyes = 12 × Float32 = 48 B (&quot;&lt;12f&quot;). Variable 52 × i16: 40 + 104 + 48 = 192 B; fixed52: 40 + 208 + 48 = 296 B (one datagram).</text>
+<text x="24" y="798" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#4b5563" text-anchor="start">Fixed52 payload offsets: BlendShapes 0, head 208, right eye 232, left eye 244. sequence counts frames; skip duplicates and older frames.</text>
+<rect x="24" y="838" width="1192" height="44" fill="#f3f4f6" stroke="#9ca3af"/>
+<text x="620.0" y="863" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2937" text-anchor="middle">GET_SCHEMA [5] · PING [6] · PONG [7] · STOP [8]: header only. ERROR [9]: 1–512 bytes of UTF-8 text.</text>
+<text x="24" y="932" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#4b5563" text-anchor="start">Both modes need validation and PING/PONG (UDP and TCP); UDP also needs SCHEMA_ACK. Revision 5 is incompatible; update both sides.</text>
+<text x="24" y="980" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#4b5563" text-anchor="start">PROTOCOL_V3.md is the definition; golden_vectors.c lists the exact bytes in C99 (optional, for development; never sent on the network).</text>
 </svg>

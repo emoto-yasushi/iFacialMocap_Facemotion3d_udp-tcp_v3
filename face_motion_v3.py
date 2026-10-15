@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Face Motion v3 (FMV3) receiver for iFacialMocap, iFacialMocapTr and Facemotion3d.
 
-Wire contract revision 5. Python 3.10+, standard library only.
+Wire contract revision 6. Python 3.10+, standard library only.
 
     UDP (recommended)  PC --HELLO--> iOS --SCHEMA--> PC --SCHEMA_ACK--> iOS --FRAME...--> PC
     TCP (alternative)  PC connects to iOS, then HELLO --> SCHEMA --> FRAME...  (no SCHEMA_ACK)
@@ -48,7 +48,18 @@ LOG = logging.getLogger("face_motion_v3")
 # =============================================================================
 
 MAGIC = b"FMV3"
-CONTRACT_REVISION = 5
+CONTRACT_REVISION = 6
+MODE_VARIABLE, MODE_FIXED52 = 0, 1
+MODE_NAMES = MappingProxyType({MODE_VARIABLE: "variable", MODE_FIXED52: "fixed52"})
+# FMV3 defines this order explicitly; do not derive it from an ARKit dictionary.
+FIXED52_NAMES = tuple("""browDownLeft browDownRight browInnerUp browOuterUpLeft browOuterUpRight
+cheekPuff cheekSquintLeft cheekSquintRight eyeBlinkLeft eyeBlinkRight eyeLookDownLeft eyeLookDownRight
+eyeLookInLeft eyeLookInRight eyeLookOutLeft eyeLookOutRight eyeLookUpLeft eyeLookUpRight eyeSquintLeft
+eyeSquintRight eyeWideLeft eyeWideRight jawForward jawLeft jawOpen jawRight mouthClose mouthDimpleLeft
+mouthDimpleRight mouthFrownLeft mouthFrownRight mouthFunnel mouthLeft mouthLowerDownLeft mouthLowerDownRight
+mouthPressLeft mouthPressRight mouthPucker mouthRight mouthRollLower mouthRollUpper mouthShrugLower
+mouthShrugUpper mouthSmileLeft mouthSmileRight mouthStretchLeft mouthStretchRight mouthUpperUpLeft
+mouthUpperUpRight noseSneerLeft noseSneerRight tongueOut""".split())
 
 # Message types (header byte 4): what a message is. Checked first on receipt.
 HELLO = 1        # PC -> iOS   start request
@@ -75,14 +86,15 @@ PORTS = MappingProxyType({"udp": (49983, 49983), "tcp": (49984, 49984)})
 
 HEADER = struct.Struct("<4sBBHQIIIIHHI")  # 40 bytes, little-endian, no padding
 HEADER_SIZE = HEADER.size
-HELLO_BODY = struct.Struct("<HHI")        # requested_fps, max_udp_size, contract_revision
+HELLO_BODY = struct.Struct("<HHIH")       # requested_fps, max_udp_size, contract_revision, requested_mode
 START_INFO = struct.Struct("<QHHII")      # client_nonce, actual_fps, max_udp_size, lease_ms, contract_revision
+SCHEMA_LAYOUT = struct.Struct("<HBBH")    # mode, encoding, schema_format_version, blend_count
 POSE = struct.Struct("<12f")              # head rx ry rz px py pz, right eye rx ry rz, left eye rx ry rz
 POSE_LAYOUT = "head_rxyz_pxyz_rightEye_rxyz_leftEye_rxyz"
 
 SCHEMA_DATAGRAM_SIZE = 576                # every UDP SCHEMA datagram, header included
 MIN_UDP_SIZE, MAX_UDP_SIZE = 576, 1200    # negotiated FRAME datagram size, header included
-MAX_SCHEMA_PAYLOAD = 262_144              # start information + JSON
+MAX_SCHEMA_PAYLOAD = 262_144              # start information + binary layout and names
 MAX_BLENDSHAPES = 4096
 MAX_NAME_BYTES = 255
 MAX_FRAME_PAYLOAD = MAX_BLENDSHAPES * 4 + POSE.size
@@ -186,8 +198,8 @@ def _read_header(data: bytes | bytearray | memoryview) -> tuple:
         raise ProtocolError(f"{TYPE_NAMES[kind]} must have sequence 0")
     if length > total:
         raise ProtocolError("chunk_length exceeds total_payload_length")
-    if kind == HELLO and total != HELLO_BODY.size:
-        raise ProtocolError("HELLO payload must be 8 bytes")
+    if kind == HELLO and total not in (8, HELLO_BODY.size):
+        raise ProtocolError("HELLO payload must be 10 bytes (8 only for legacy-revision refusal)")
     if kind in EMPTY_CONTROLS and total != 0:
         if kind == SCHEMA_ACK:   # revision 4 numbered SCHEMA 3
             raise ProtocolError("type 3 with a payload: this looks like a SCHEMA from an iOS app using "
@@ -364,16 +376,16 @@ class Reassembler:
 
 
 # =============================================================================
-# 3. Message bodies: HELLO, SCHEMA (start information + JSON), FRAME
+# 3. Message bodies: HELLO, SCHEMA (start information + binary layout), FRAME
 # =============================================================================
 
-def hello_payload(fps: int = 60, udp_size: int = MAX_UDP_SIZE) -> bytes:
-    """HELLO body: requested FPS limit, largest FRAME datagram, contract revision."""
+def hello_payload(fps: int = 60, udp_size: int = MAX_UDP_SIZE, mode: str = "variable") -> bytes:
+    """10-byte HELLO body: FPS limit, FRAME datagram limit, revision and requested mode."""
     if type(fps) is not int or not 1 <= fps <= 60:
         raise ProtocolError("requested fps must be 1-60")
     if type(udp_size) is not int or not MIN_UDP_SIZE <= udp_size <= MAX_UDP_SIZE:
         raise ProtocolError("requested UDP size must be 576-1200")
-    return HELLO_BODY.pack(fps, udp_size, CONTRACT_REVISION)
+    return HELLO_BODY.pack(fps, udp_size, CONTRACT_REVISION, mode_number(mode))
 
 
 @dataclass(frozen=True)
@@ -404,103 +416,116 @@ class StartInfo:
                                self.max_udp_size, self.lease_ms, CONTRACT_REVISION)
 
 
-def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ProtocolError(f"duplicate JSON key {key!r}")
-        result[key] = value
-    return result
-
-
-def _no_nan(value: str) -> None:
-    raise ProtocolError(f"JSON constant {value} is not allowed")
-
-
-# Keys whose value changes how FRAME bytes are read. An unknown value is rejected.
-_FIXED_SCHEMA_VALUES = MappingProxyType({
-    "blend_unit": "percent", "pose_layout": POSE_LAYOUT,
-    "rotation_unit": "degree", "position_unit": "meter",
-})
+def mode_number(mode: str) -> int:
+    for number, name in MODE_NAMES.items():
+        if mode == name:
+            return number
+    raise ProtocolError("mode must be 'variable' or 'fixed52'")
 
 
 @dataclass(frozen=True)
 class Schema:
-    """One SCHEMA: the BlendShape name list in FRAME order and how to read the values."""
+    """A binary layout; fixed52 derives its names locally and never changes layout."""
     session_id: int
     schema_id: int
     app: str
     profile: str
     blend_names: tuple[str, ...]
-    blend_encoding: str                 # "i16" or "i32"
+    blend_encoding: str
     index_by_name: Mapping[str, int]
     blend_struct: struct.Struct
+    mode: str = "variable"
 
     @property
     def frame_bytes(self) -> int:
         return self.blend_struct.size + POSE.size
 
     @classmethod
-    def parse(cls, json_bytes: bytes, session_id: int = 1, schema_id: int = 1) -> Schema:
-        """Parse the schema JSON (the SCHEMA payload after its 20-byte start information).
-
-        Forward compatible: unknown keys are ignored and "app"/"profile" may hold
-        new names. Keys that decide how FRAME bytes are read must be known values.
-        """
-        try:
-            obj = json.loads(json_bytes.decode("utf-8"), object_pairs_hook=_no_duplicate_keys,
-                             parse_constant=_no_nan)
-        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-            raise ProtocolError(f"invalid schema JSON: {exc}") from exc
-        if type(obj) is not dict:
-            raise ProtocolError("schema JSON must be an object")
-        if obj.get("schema_version") != 1 or type(obj.get("schema_version")) is not int:
-            raise ProtocolError("schema_version must be 1")
-        for key, expected in _FIXED_SCHEMA_VALUES.items():
-            if obj.get(key) != expected:
-                raise ProtocolError(f"{key} must be {expected!r}")
-        encoding = obj.get("blend_encoding")
-        if encoding not in ("i16", "i32"):
-            raise ProtocolError("blend_encoding must be 'i16' or 'i32'")
-        app, profile = obj.get("app", ""), obj.get("profile", "")
-        if type(app) is not str or type(profile) is not str:
-            raise ProtocolError("app and profile must be strings")
-        names = obj.get("blend_names")
-        if type(names) is not list or len(names) > MAX_BLENDSHAPES:
-            raise ProtocolError("blend_names must be a list of at most 4096 names")
-        for name in names:
-            if type(name) is not str:
-                raise ProtocolError("blend names must be strings")
-            try:
-                size = len(name.encode("utf-8"))
-            except UnicodeEncodeError as exc:
-                raise ProtocolError("blend name is not valid Unicode") from exc
-            if not 1 <= size <= MAX_NAME_BYTES or any(ord(c) < 0x20 for c in name):
-                raise ProtocolError("blend name must be 1-255 UTF-8 bytes without control characters")
-        if len(set(names)) != len(names):
-            raise ProtocolError("duplicate blend name")
-        layout = struct.Struct(f"<{len(names)}{'h' if encoding == 'i16' else 'i'}")
-        return cls(session_id, schema_id, app, profile, tuple(names), encoding,
-                   MappingProxyType({name: i for i, name in enumerate(names)}), layout)
+    def parse(cls, layout_bytes: bytes, session_id: int = 1, schema_id: int = 1) -> Schema:
+        if len(layout_bytes) > MAX_SCHEMA_PAYLOAD - START_INFO.size:
+            raise ProtocolError("SCHEMA payload exceeds the protocol limit")
+        if len(layout_bytes) < SCHEMA_LAYOUT.size:
+            raise ProtocolError("SCHEMA binary layout is incomplete")
+        mode, encoding, version, count = SCHEMA_LAYOUT.unpack_from(layout_bytes)
+        if mode not in MODE_NAMES or encoding not in (1, 2) or version != 1:
+            raise ProtocolError("unsupported SCHEMA mode, encoding or format version")
+        if count > MAX_BLENDSHAPES:
+            raise ProtocolError("too many BlendShape names")
+        if mode == MODE_FIXED52:
+            if count != 52 or encoding != 2 or schema_id != 1 or len(layout_bytes) != SCHEMA_LAYOUT.size:
+                raise ProtocolError("fixed52 requires 52 i32 values, schema_id 1 and no strings")
+            names, app, profile = FIXED52_NAMES, "", ""
+        else:
+            offset = SCHEMA_LAYOUT.size
+            def string(width: int) -> str:
+                nonlocal offset
+                if offset + width > len(layout_bytes):
+                    raise ProtocolError("SCHEMA string length is incomplete")
+                size = int.from_bytes(layout_bytes[offset:offset + width], "little")
+                offset += width
+                if offset + size > len(layout_bytes):
+                    raise ProtocolError("SCHEMA string exceeds the payload")
+                try:
+                    result = layout_bytes[offset:offset + size].decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ProtocolError("SCHEMA string is not valid UTF-8") from exc
+                offset += size
+                return result
+            app, profile = string(2), string(2)
+            names = tuple(string(1) for _ in range(count))
+            if offset != len(layout_bytes):
+                raise ProtocolError("SCHEMA has trailing bytes")
+            for name in names:
+                if not name or any(ord(c) < 0x20 for c in name):
+                    raise ProtocolError("blend name must be 1-255 UTF-8 bytes without control characters")
+            if len(set(names)) != len(names):
+                raise ProtocolError("duplicate blend name")
+        type_name = "i16" if encoding == 1 else "i32"
+        layout = struct.Struct(f"<{count}{'h' if encoding == 1 else 'i'}")
+        return cls(session_id, schema_id, app, profile, tuple(names), type_name,
+                   MappingProxyType({name: i for i, name in enumerate(names)}), layout, MODE_NAMES[mode])
 
 
 APP_PROFILES = MappingProxyType({"iFacialMocap": "ifacialmocap-stream",
                                  "Facemotion3d": "facemotion3d-other"})
 
 
-def schema_json(names: Sequence[str], *, app: str = "iFacialMocap", encoding: str = "i16") -> bytes:
-    """Build schema JSON the way the iOS apps do (used by the simulator and tests)."""
-    obj = {"schema_version": 1, "app": app, "profile": APP_PROFILES.get(app, ""),
-           "blend_names": list(names), "blend_encoding": encoding, "blend_unit": "percent",
-           "pose_layout": POSE_LAYOUT, "rotation_unit": "degree", "position_unit": "meter"}
-    data = json.dumps(obj, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+def schema_binary(names: Sequence[str] = (), *, app: str = "iFacialMocap",
+                  profile: str | None = None, encoding: str = "i16", mode: str = "variable") -> bytes:
+    """Build the binary SCHEMA layout after StartInfo (also used by the simulator)."""
+    number = mode_number(mode)
+    if number == MODE_FIXED52:
+        return SCHEMA_LAYOUT.pack(number, 2, 1, 52)
+    if encoding not in ("i16", "i32") or len(names) > MAX_BLENDSHAPES:
+        raise ProtocolError("invalid BlendShape encoding or count")
+    result = bytearray(SCHEMA_LAYOUT.pack(number, 1 if encoding == "i16" else 2, 1, len(names)))
+    def append_string(value: str, width: int) -> None:
+        if type(value) is not str:
+            raise ProtocolError("SCHEMA strings must be text")
+        try:
+            data = value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ProtocolError("SCHEMA string is not valid Unicode") from exc
+        if len(data) >= 1 << (width * 8):
+            raise ProtocolError("SCHEMA string is too long")
+        result.extend(len(data).to_bytes(width, "little"))
+        result.extend(data)
+    append_string(app, 2)
+    append_string(APP_PROFILES.get(app, "") if profile is None else profile, 2)
+    for name in names:
+        append_string(name, 1)
+    data = bytes(result)
+    if START_INFO.size + len(data) > MAX_SCHEMA_PAYLOAD:
+        raise ProtocolError("SCHEMA payload exceeds the protocol limit")
     Schema.parse(data)
     return data
 
 
-def schema_body(json_bytes: bytes, start: StartInfo) -> bytes:
-    """Complete SCHEMA payload: 20-byte start information followed by the JSON."""
-    return start.pack() + json_bytes
+def schema_body(layout_bytes: bytes, start: StartInfo) -> bytes:
+    """Complete SCHEMA body: existing 20-byte StartInfo and a binary layout."""
+    if START_INFO.size + len(layout_bytes) > MAX_SCHEMA_PAYLOAD:
+        raise ProtocolError("SCHEMA payload exceeds the protocol limit")
+    return start.pack() + layout_bytes
 
 
 @dataclass(frozen=True)
@@ -509,7 +534,7 @@ class Frame:
     schema: Schema
     sequence: int
     source_token: int      # app-defined UInt32; 0 = not available. Receivers may ignore it.
-    tracking: bool         # flags bit 0: face tracked (live: now; playback: when this frame was recorded)
+    tracking: bool         # flags bit 0: the camera tracks the face now (also during playback)
     playback: bool         # flags bit 1: the values come from a recording being played back
     blend_values: tuple[int, ...]
     pose: tuple[float, ...]
@@ -638,6 +663,8 @@ class Session:
         if StartInfo.parse(body) != self.start:
             raise ProtocolError("session settings changed without a new session")
         schema = Schema.parse(body[START_INFO.size:], self.session_id, packet.schema_id)
+        if schema.mode != self.schema.mode or self.schema.mode == "fixed52":
+            raise ProtocolError("session mode/layout changed without a new session")
         # Commit only after the whole table is valid; old partial data is dropped.
         self._assembly.clear()
         self.outbound = [item for item in self.outbound if item[0] not in (SCHEMA_ACK, GET_SCHEMA)]
@@ -649,6 +676,8 @@ class Session:
 
     def _receive_frame(self, packet: Packet, now: float) -> Frame | None:
         schema = self.schema
+        if schema.mode == "fixed52" and (packet.schema_id != 1 or packet.part_count != 1):
+            raise ProtocolError("fixed52 FRAME requires schema_id 1 and one part")
         if packet.schema_id > schema.schema_id:
             self.stats["unknown_schema"] += 1
             self.request_schema(packet.schema_id, now)
@@ -791,13 +820,15 @@ class V3Client:
     pc_port     port this PC listens on (default UDP 49983 / TCP 49984; 0 = any, for tests).
 
     There is no authentication: use a trusted LAN. A running stream is never taken
-    over; a new session is accepted only in WAIT_SCHEMA or WAITING.
+    over; a new session is accepted only in WAIT_SCHEMA or WAITING. Over TCP a new
+    connection closes neither the normal-start nor the session's connection until its
+    own complete, valid SCHEMA arrives.
     """
 
     def __init__(self, host: str | None = None, *, transport: str = "udp",
                  ios_port: int | None = None,
                  pc_port: int | None = None, bind: str = "0.0.0.0", listen_only: bool = False,
-                 fps: int = 60, udp_size: int = MAX_UDP_SIZE,
+                 fps: int = 60, udp_size: int = MAX_UDP_SIZE, mode: str = "variable",
                  recovery: RecoveryPolicy | None = None) -> None:
         ios_default, pc_default = default_ports(transport)
         self.ios_port = ios_default if ios_port is None else ios_port
@@ -806,12 +837,12 @@ class V3Client:
             raise ValueError("ios_port must be 1-65535")
         if type(self.pc_port) is not int or not 0 <= self.pc_port <= 65535:
             raise ValueError("pc_port must be 0-65535")
-        hello_payload(fps, udp_size)  # validates fps and udp_size
+        hello_payload(fps, udp_size, mode)  # validates settings and requested mode
         if not host and not listen_only:
             raise ValueError("give the iOS host, or listen_only=True to wait for a manual start")
         self.host, self.transport = host, transport
         self.bind, self.listen_only = bind, listen_only
-        self.fps, self.udp_size = fps, udp_size
+        self.fps, self.udp_size, self.mode = fps, udp_size, mode
         self.policy = recovery or RecoveryPolicy()
         self.state = "STOPPED"
         self.last_error: str | None = None
@@ -826,7 +857,8 @@ class V3Client:
         self.session = None
         self._session_peer = None               # UDP: iOS address of the session
         self._session_conn: _Connection | None = None  # TCP: connection of the session
-        self._conn: _Connection | None = None   # TCP: the current connection
+        self._outgoing: _Connection | None = None      # TCP: our normal-start connection (HELLO)
+        self._incoming: _Connection | None = None      # TCP: newest accepted connection, no session yet
         self._sock: socket.socket | None = None  # UDP socket or TCP listener
         self._candidate: _Candidate | None = None
         self._retired: list[tuple] = []
@@ -906,7 +938,7 @@ class V3Client:
     def _send(self, kind: int, payload: bytes = b"", *, schema_id: int = 0, sequence: int = 0) -> None:
         if kind == HELLO:
             session_id, udp_size = self._hello_nonce, self.udp_size
-            peer, conn = self._target, self._conn
+            peer, conn = self._target, self._outgoing
         elif self.session is not None:
             session_id, udp_size = self.session.session_id, self.session.udp_size
             peer, conn = self._session_peer, self._session_conn
@@ -977,7 +1009,7 @@ class V3Client:
     def _hello_refusal(self, packet: Packet, peer, conn: _Connection | None) -> None:
         """Apply an ERROR only to the HELLO that is still waiting for an answer."""
         if self.transport == "tcp":
-            from_request = conn is not None and conn is self._conn and conn.outgoing
+            from_request = conn is not None and conn is self._outgoing
         else:
             from_request = peer == self._target
         if (self._hello_pending and self.session is None and self.watchdog.state == "WAIT_SCHEMA"
@@ -1010,9 +1042,17 @@ class V3Client:
         if not self._acceptable_start(start):
             return
         schema = Schema.parse(body[START_INFO.size:], packet.session_id, packet.schema_id)
+        if schema.mode != self.mode:
+            raise ProtocolError("SCHEMA mode does not match the requested receiver mode")
+        if schema.mode == "fixed52" and packet.part_count != 1:
+            raise ProtocolError("fixed52 SCHEMA cannot be fragmented")
         if on_schema:
             _call(on_schema, schema)              # no ACK and no adoption if this fails
+        others = [c for c in self._connections() if c is not conn]
         self._retire_session()
+        for other in others:                      # TCP: only the new session's connection stays open
+            self._close(other, "a new session started on another TCP connection")
+        self._outgoing = self._incoming = None    # closed above, or `conn` now has the session role
         self.session = Session(packet.session_id, start, schema, body, transport=self.transport, now=now)
         self._session_peer, self._session_conn = peer, conn
         self._hello_pending = False
@@ -1076,7 +1116,7 @@ class V3Client:
                     attempts += 1
                     next_hello = now + self.policy.hello_interval
                     try:
-                        self._send(HELLO, hello_payload(self.fps, self.udp_size))
+                        self._send(HELLO, hello_payload(self.fps, self.udp_size, self.mode))
                     except OSError as exc:
                         self.last_error = str(exc)
                 else:
@@ -1102,13 +1142,32 @@ class V3Client:
                     last_warning = time.monotonic()
 
     # ---- TCP ---------------------------------------------------------------------
+    # At most three connections, each in one role: our normal-start connection that
+    # carries the HELLO (_outgoing), the newest accepted connection that has not
+    # started a session (_incoming), and the session's connection (_session_conn).
+    # Accepting a connection closes only an older accepted connection that is still
+    # waiting for its first SCHEMA. Only a complete, valid SCHEMA gives a connection
+    # the session role; then every other connection is closed (_new_session_schema).
+    # A connection that fails on its own is closed alone.
 
-    def _close_connection(self, reason: str) -> None:
-        conn, self._conn = self._conn, None
+    def _connections(self) -> list[_Connection]:
+        return [c for c in (self._session_conn, self._outgoing, self._incoming) if c is not None]
+
+    def _is_open(self, conn: _Connection) -> bool:
+        return conn is self._session_conn or conn is self._outgoing or conn is self._incoming
+
+    def _close(self, conn: _Connection | None, reason: str) -> None:
+        """Close one connection. Only closing the session's own connection ends the session."""
         if conn is None:
             return
         conn.sock.close()
-        self._hello_pending = False
+        if conn is not self._session_conn:
+            LOG.debug("Closed the TCP connection %s %s: %s", "to" if conn.outgoing else "from",
+                      conn.peer[0], reason)
+        if conn is self._outgoing:                # the HELLO on it can no longer be answered
+            self._outgoing, self._hello_pending = None, False
+        if conn is self._incoming:
+            self._incoming = None
         if self._candidate is not None and self._candidate.connection is conn:
             self._candidate = None
         if conn is self._session_conn:            # a session never moves to another connection
@@ -1118,27 +1177,33 @@ class V3Client:
     def _connect(self, now: float, family: int) -> None:
         sock = socket.socket(family, socket.SOCK_STREAM)
         sock.setblocking(False)
-        self._conn = _Connection(sock, self._target, outgoing=True, started=now)
+        conn = self._outgoing = _Connection(sock, self._target, outgoing=True, started=now)
         error = sock.connect_ex(self._target)
         if error not in (0, errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY, 10035):
-            self._close_connection("TCP connection failed")
+            self._close(conn, "TCP connection failed")
 
     def _connected(self, now: float) -> None:
-        conn = self._conn
+        conn = self._outgoing
         error = conn.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
         if error:
-            self._close_connection("TCP connection failed")
+            self._close(conn, "TCP connection failed")
             return
         conn.established = now                    # the first-SCHEMA deadline starts here
-        conn.sock.settimeout(0.5)
-        conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         try:
-            self._send(HELLO, hello_payload(self.fps, self.udp_size))
+            conn.sock.settimeout(0.5)
+            conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self._send(HELLO, hello_payload(self.fps, self.udp_size, self.mode))
         except OSError as exc:
             self.last_error = str(exc)
-            self._close_connection("HELLO could not be sent")
+            self._close(conn, "HELLO could not be sent")
 
     def _accept(self, now: float) -> None:
+        """Keep a new connection from iOS beside the normal-start and session connections.
+
+        Only one accepted connection may wait for its first SCHEMA: a newer one
+        replaces it (an app that reconnects). The normal-start connection and the
+        session's connection stay open until a valid SCHEMA arrives on this one.
+        """
         try:
             sock, address = self._sock.accept()
         except OSError:
@@ -1146,16 +1211,54 @@ class V3Client:
         if not self._allowed(address) or self.watchdog.state not in ("WAIT_SCHEMA", "WAITING"):
             sock.close()                          # a connection alone never replaces a stream
             return
-        self._close_connection("replaced by a manual TCP connection from iOS")
-        sock.settimeout(0.5)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self._conn = _Connection(sock, address, outgoing=False, started=now, established=now)
+        try:
+            sock.settimeout(0.5)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:                           # reset before accept (macOS: EINVAL); drop it alone
+            sock.close()
+            return
+        self._close(self._incoming, "replaced by a newer TCP connection")
+        self._incoming = _Connection(sock, address, outgoing=False, started=now, established=now)
+
+    def _expire_connections(self, now: float) -> None:
+        """Deadlines of connections without a session (the session uses the FRAME timers)."""
+        outgoing, incoming = self._outgoing, self._incoming
+        if outgoing is not None:
+            if outgoing.established is None:
+                if now - outgoing.started >= self.policy.connect_timeout:
+                    self._close(outgoing, "TCP connect timeout")
+            elif now - outgoing.established >= self.policy.first_schema_timeout:
+                self._close(outgoing, f"no complete SCHEMA within {self.policy.first_schema_timeout:g} s "
+                                      "of connecting")
+        if incoming is not None and now - incoming.established >= self.policy.first_schema_timeout:
+            reason = f"no complete SCHEMA within {self.policy.first_schema_timeout:g} s of accepting it"
+            LOG.info("Closing the TCP connection from %s: %s", incoming.peer[0], reason)
+            self._close(incoming, reason)
+
+    def _receive_tcp(self, conn: _Connection, on_frame, on_schema) -> None:
+        """Read one connection. Bad data or a close by iOS closes this connection only."""
+        try:
+            data = conn.sock.recv(65536)
+            if not data:
+                self._close(conn, "TCP connection closed")
+                return
+            for packet in conn.framer.feed(data):
+                self._dispatch(packet, conn.peer, conn, time.monotonic(), on_frame, on_schema)
+                if not self._is_open(conn):
+                    break
+        except (ProtocolError, OSError) as exc:
+            self.last_error = str(exc)
+            LOG.warning("Closing the TCP connection %s %s: %s", "to" if conn.outgoing else "from",
+                        conn.peer[0], exc)
+            self._close(conn, "invalid or broken TCP stream")
 
     def _run_tcp(self, stopped, on_frame, on_schema, start: float, family: int) -> None:
         attempts, next_connect = 0, start
         while not stopped():
             now = time.monotonic()
-            if (self._conn is None and self.watchdog.state == "WAIT_SCHEMA" and not self.listen_only
+            # Normal start: one outgoing connection at a time, made again after it closes
+            # (also while an accepted connection waits) until a session starts.
+            if (self._outgoing is None and self.watchdog.state == "WAIT_SCHEMA" and not self.listen_only
                     and now >= next_connect):
                 if attempts < self.policy.hello_attempts:
                     attempts += 1
@@ -1163,45 +1266,29 @@ class V3Client:
                     self._connect(now, family)
                 else:
                     self._enter_waiting(f"no connection after 5 attempts; waiting on TCP {self.local_port}")
-            conn = self._conn
-            if conn is not None:
-                if conn.established is None:
-                    if now - conn.started >= self.policy.connect_timeout:
-                        self._close_connection("TCP connect timeout")
-                elif conn is not self._session_conn and now - conn.established >= self.policy.first_schema_timeout:
-                    self._close_connection("no complete SCHEMA within 5 s of connecting")
+            self._expire_connections(now)
             try:
                 self._tick(now)
-            except OSError as exc:
+            except OSError as exc:                # PING / GET_SCHEMA on the session's connection
                 self.last_error = str(exc)
-                self._close_connection("TCP send failed")
-            conn = self._conn
-            readers, writers = [self._sock], []
-            if conn is not None:
-                (readers if conn.established is not None else writers).append(conn.sock)
-            ready, writable, _ = select.select(readers, writers, [], 0.2 if self.state == "WAITING" else 0.05)
+                self._close(self._session_conn, "TCP send failed")
+            outgoing = self._outgoing
+            connecting = outgoing if outgoing is not None and outgoing.established is None else None
+            readers = [self._sock] + [c.sock for c in self._connections() if c.established is not None]
+            writers = [connecting.sock] if connecting is not None else []
+            # A connect that fails is reported as writable, but on Windows only as an exception.
+            ready, writable, failed = select.select(readers, writers, writers,
+                                                    0.2 if self.state == "WAITING" else 0.05)
             now = time.monotonic()
+            if connecting is not None and (connecting.sock in writable or connecting.sock in failed):
+                self._connected(now)              # reads SO_ERROR: connected or failed
+            for conn in self._connections():
+                # Only established sockets were selected. A SCHEMA read on one connection
+                # may close the others in this loop.
+                if conn.sock in ready and self._is_open(conn):
+                    self._receive_tcp(conn, on_frame, on_schema)
             if self._sock in ready:
                 self._accept(now)
-            conn = self._conn
-            if conn is None:
-                continue
-            if conn.sock in writable and conn.established is None:
-                self._connected(now)
-            elif conn.sock in ready and conn.established is not None:
-                try:
-                    data = conn.sock.recv(65536)
-                    if not data:
-                        self._close_connection("TCP connection closed")
-                        continue
-                    for packet in conn.framer.feed(data):
-                        self._dispatch(packet, conn.peer, conn, time.monotonic(), on_frame, on_schema)
-                        if self._conn is not conn:
-                            break
-                except (ProtocolError, OSError) as exc:
-                    self.last_error = str(exc)
-                    LOG.warning("Closing TCP connection: %s", exc)
-                    self._close_connection("invalid or broken TCP stream")
 
     # ---- public API --------------------------------------------------------------
 
@@ -1243,10 +1330,10 @@ class V3Client:
                     self._send(STOP)
                 except (OSError, ProtocolError):
                     pass
-            if self._conn is not None:
-                self._conn.sock.close()
+            for conn in self._connections():      # TCP: STOP went only on the session's connection
+                conn.sock.close()
             self._sock.close()
-            self._conn = self._sock = None
+            self._outgoing = self._incoming = self._sock = None
             self.state = "STOPPED"
 
 
@@ -1275,6 +1362,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--host", help="iPhone/iPad address (normal start); also the only accepted sender")
     parser.add_argument("--listen", action="store_true", help="wait for a manual start from iOS; send nothing first")
     parser.add_argument("--transport", choices=("udp", "tcp"), default="udp")
+    parser.add_argument("--mode", choices=("variable", "fixed52"), default="variable",
+                        help="requested/accepted layout; fixed52 always uses 52 Int32 values")
     parser.add_argument("--ios-port", type=int, help="port on iOS that this PC connects to (default UDP 49983 / TCP 49984)")
     parser.add_argument("--pc-port", type=int, help="port this PC listens on (default UDP 49983 / TCP 49984)")
     parser.add_argument("--bind", default="0.0.0.0", help="local address; use :: for IPv6")
@@ -1296,7 +1385,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         client = V3Client(args.host, transport=args.transport, ios_port=args.ios_port,
                           pc_port=args.pc_port, bind=args.bind, listen_only=args.listen,
-                          fps=args.fps, udp_size=args.udp_size)
+                          fps=args.fps, udp_size=args.udp_size, mode=args.mode)
         if args.jsonl:
             output = open(args.jsonl, "x", encoding="utf-8", buffering=65536)
 

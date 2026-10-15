@@ -15,6 +15,8 @@ Add --transport tcp to BOTH commands for TCP. Stop each with Ctrl+C.
 By default 3 BlendShapes are sent and a 4th is added after 30 frames (a new
 SCHEMA, as when playback of a recording with another BlendShape list starts);
 --change-after 0 keeps one SCHEMA. --count sets the number of BlendShapes.
+For fixed52, HELLO selects the mode; manual start uses --mode fixed52. This
+mode always sends 52 Int32 values, even across the simulated playback change.
 """
 from __future__ import annotations
 
@@ -118,12 +120,13 @@ class Simulator:
                  count: int = 3, change_after: int = 30, max_udp_size: int = v3.MAX_UDP_SIZE,
                  reverse_fragments: bool = False, drop_first_schema: bool = False,
                  drop_first_schema_part: int | None = None, mute_frames: bool = False,
-                 mute_after: int = 0) -> None:
+                 mute_after: int = 0, mode: str = "variable") -> None:
         if transport not in ("udp", "tcp") or not 3 <= count <= 4095:
             raise ValueError("invalid simulator configuration")
         if not v3.MIN_UDP_SIZE <= max_udp_size <= v3.MAX_UDP_SIZE:
             raise ValueError("max_udp_size must be 576-1200")
-        self.transport, self.app_name = transport, APP_NAME
+        v3.mode_number(mode)
+        self.transport, self.app_name, self.manual_mode = transport, APP_NAME, mode
         # Replies arrive from an IP address, so resolve a host name once here.
         self.push_to = None if push_to is None else (socket.gethostbyname(push_to[0]), push_to[1])
         self.count, self.change_after, self.max_udp_size = count, change_after, max_udp_size
@@ -173,29 +176,33 @@ class Simulator:
         self.fps, self.udp_size = 60, self.max_udp_size
         self.schema_id, self.sequence, self.frames_sent = 0, 0, 0
         self.changed = False
+        self.mode = self.manual_mode
         self.schema_sends = 0
         self.delivery = SchemaDelivery(self.transport)
         self.last_control = self.next_frame = 0.0
 
-    def _begin_session(self, now: float, *, nonce: int, peer, fps: int, udp_size: int) -> None:
+    def _begin_session(self, now: float, *, nonce: int, peer, fps: int, udp_size: int,
+                       mode: str = "variable") -> None:
         self._end_session()
         self.session_id = secrets.randbits(64) or 1
-        self.nonce, self.peer = nonce, peer
+        self.nonce, self.peer, self.mode = nonce, peer, mode
         self.fps, self.udp_size = fps, udp_size
         self.last_control = self.next_frame = now
         self._install_schema(now)
         self._send_schema(now)                   # SCHEMA is the only positive answer to HELLO
 
     def _names(self) -> list[str]:
+        if self.mode == "fixed52":
+            return list(v3.FIXED52_NAMES)
         names = ["jawOpen", "eyeBlinkLeft", "myCustomSmile"] + [f"custom_{i:04d}" for i in range(self.count - 3)]
         return names + ["myCustomAngry"] if self.changed else names
 
     def _install_schema(self, now: float) -> None:
         self.schema_id += 1
-        json_bytes = v3.schema_json(self._names(), app=self.app_name)
-        self.schema = v3.Schema.parse(json_bytes, self.session_id, self.schema_id)
+        layout = v3.schema_binary(self._names(), app=self.app_name, mode=self.mode)
+        self.schema = v3.Schema.parse(layout, self.session_id, self.schema_id)
         start = v3.StartInfo(self.nonce, self.fps, self.udp_size, LEASE_MS)
-        self.delivery.install(self.schema_id, v3.schema_body(json_bytes, start), now)
+        self.delivery.install(self.schema_id, v3.schema_body(layout, start), now)
 
     # ---- sending -----------------------------------------------------------------
 
@@ -238,14 +245,22 @@ class Simulator:
     # ---- receiving ---------------------------------------------------------------
 
     def _on_hello(self, packet: v3.Packet, peer, now: float) -> None:
-        fps, udp_size, revision = v3.HELLO_BODY.unpack(packet.payload)
+        if len(packet.payload) == 8:
+            revision = int.from_bytes(packet.payload[4:8], "little")
+            reason = (f"UNSUPPORTED_CONTRACT: requires {v3.CONTRACT_REVISION}"
+                      if revision != v3.CONTRACT_REVISION else "INVALID_HELLO")
+            self._refuse(packet.session_id, reason, peer)
+            return
+        fps, udp_size, revision, mode = v3.HELLO_BODY.unpack(packet.payload)
         if revision != v3.CONTRACT_REVISION:
             self._refuse(packet.session_id, f"UNSUPPORTED_CONTRACT: requires {v3.CONTRACT_REVISION}", peer)
+        elif mode not in v3.MODE_NAMES:
+            self._refuse(packet.session_id, "UNSUPPORTED_MODE", peer)
         elif not 1 <= fps <= 60 or not v3.MIN_UDP_SIZE <= udp_size <= v3.MAX_UDP_SIZE:
             self._refuse(packet.session_id, "INVALID_HELLO", peer)
         elif not self.session_id:
             self._begin_session(now, nonce=packet.session_id, peer=peer, fps=fps,
-                                udp_size=min(udp_size, self.max_udp_size))
+                                udp_size=min(udp_size, self.max_udp_size), mode=v3.MODE_NAMES[mode])
             self.hello_payload = packet.payload
         elif (peer is not None and peer != self.peer) or packet.session_id != self.nonce:
             self._refuse(packet.session_id, "BUSY", peer)
@@ -292,7 +307,8 @@ class Simulator:
             return
         if self.change_after > 0 and not self.changed and self.frames_sent >= self.change_after:
             self.changed = True                  # e.g. playback of a recording with another BlendShape list starts
-            self._install_schema(now)
+            if self.mode == "variable":
+                self._install_schema(now)
         if self.delivery.due(now):
             self._send_schema(now)
         if not self.delivery.can_send_frames() or now < self.next_frame:
@@ -301,11 +317,15 @@ class Simulator:
             return
         self.next_frame = now + 1.0 / self.fps
         values = [self.frames_sent % 101, 0, -25] + [0] * (len(self.schema.blend_names) - 3)
+        if self.mode == "fixed52":
+            values[24], values[51] = 150, 70000
         if self.changed:
             values[-1] = 150                     # values above 100 are valid
         pose = [1.25, -2.5, 3.75, 0.1, -0.2, 0.3, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
         self.sequence = (self.sequence + 1) & 0xFFFFFFFF
         flags = 0 if self.frames_sent % 40 == 39 else v3.TRACKED   # shows tracking loss now and then
+        if self.mode == "fixed52" and self.changed:
+            flags |= v3.PLAYBACK
         self._send(v3.FRAME, v3.frame_payload(self.schema, values, pose), schema_id=self.schema_id,
                    sequence=self.sequence, flags=flags, token=EXAMPLE_SOURCE_TOKEN)
         self.frames_sent += 1
@@ -319,7 +339,7 @@ class Simulator:
             self.connection.settimeout(0.02)
             self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.framer = v3.TCPFramer()
-        self._begin_session(now, nonce=0, peer=self.push_to, fps=60, udp_size=self.max_udp_size)
+        self._begin_session(now, nonce=0, peer=self.push_to, fps=60, udp_size=self.max_udp_size, mode=self.manual_mode)
 
     def _close_connection(self) -> None:
         if self.connection is not None:
@@ -399,6 +419,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--push-host", help="manual start: send to the receiver (PC) at this address")
     parser.add_argument("--pc-port", type=int, help="manual start: receiver (PC) port (default UDP 49983 / TCP 49984)")
     parser.add_argument("--push-delay", type=float, default=0.0, help="manual start: wait this many seconds first")
+    parser.add_argument("--mode", choices=("variable", "fixed52"), default="variable",
+                        help="manual-start layout; normal start follows the HELLO request")
     parser.add_argument("--count", type=int, default=3, help="number of BlendShapes (3-4095)")
     parser.add_argument("--change-after", type=int, default=30,
                         help="add one BlendShape (a new SCHEMA) after N frames; 0 = never")
@@ -420,7 +442,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                               max_udp_size=args.max_udp_size, reverse_fragments=args.reverse_fragments,
                               drop_first_schema=args.drop_first_schema,
                               drop_first_schema_part=args.drop_first_schema_part,
-                              mute_frames=args.mute_frames, mute_after=args.mute_after)
+                              mute_frames=args.mute_frames, mute_after=args.mute_after, mode=args.mode)
         simulator.serve(threading.Event(), push_delay=args.push_delay)
     except KeyboardInterrupt:
         pass
