@@ -150,12 +150,19 @@ This happens mainly when iOS is already streaming to another receiver, when the 
 
 </details>
 
-**When iOS stops sending.** When sending stops on the iOS side, no message tells the receiver (PC) (STOP goes from the receiver (PC) to iOS; only when the stream ends with an error does an ERROR arrive). Over UDP the FRAMEs simply stop, so the receiver (PC) tries to recover as in [section 5](#timers) and then waits (WAITING). Over TCP the connection closes, so the receiver (PC) waits right away.
+**When iOS stops sending.** When sending stops on the iOS side, no message tells the receiver (PC) (STOP goes from the receiver (PC) to iOS; only when the stream ends with an error does an ERROR arrive). Over UDP the FRAMEs simply stop, so the receiver (PC) tries to recover as in [section 5](#timers) and then waits (WAITING). Over TCP the connection closes, so the receiver (PC) waits right away. A full-screen ad is an exception: when it covers the tracking screen during a UDP session, an ERROR (`APP_INACTIVE`) arrives, and after the ad iOS starts sending again by itself (details below).
 
 <details>
 <summary>Details: when iOS stops sending</summary>
 
-For example, when the user presses Stop in the app, leaves the tracking screen, the trial time ends, or the camera is interrupted (for example, another app starts using it) or fails. While the camera is interrupted, iOS does not answer a HELLO (over UDP nothing comes back; over TCP the connection fails or is closed without an ERROR). When the interruption ends, streaming that was started on iOS (in Facemotion3d, with the Live button) starts again by itself as a new session. Streaming that a receiver (PC) started does not start again. The receiver (PC) is then waiting (WAITING), so start it again. In Facemotion3d with neither the "Other" nor the "Unity" license, iOS does not refuse the HELLO: it starts sending and stops by itself after about 10 seconds.
+For example, when the user presses Stop in the app, leaves the tracking screen, the trial time ends, or the camera is interrupted (for example, another app starts using it) or fails. While the camera is interrupted, iOS does not answer a HELLO (over UDP nothing comes back; over TCP the connection fails or is closed without an ERROR). When the interruption ends, streaming that was started on iOS (in Facemotion3d, with the Live button) starts again by itself as a new session. Streaming that a receiver (PC) started does not start again (except after a full-screen ad over UDP; see below). The receiver (PC) is then waiting (WAITING), so start it again. In Facemotion3d with neither the "Other" nor the "Unity" license, iOS does not refuse the HELLO: it starts sending and stops by itself after about 10 seconds.
+
+**Full-screen ads.** When a full-screen ad covers the tracking screen during a UDP session, iOS sends ERROR `APP_INACTIVE` and ends the session. When the receiver (PC) receives this ERROR, it enters WAITING ([section 5](#timers)) and keeps its port open. When the ad closes, iOS starts sending again by itself:
+
+- Streaming that was started on iOS starts again by itself as a new session, as before.
+- For a session that a receiver (PC) started, iOS starts a new session to the same address and port (the ones the receiver (PC) sent its HELLO from). It has the same form as a manual start (a SCHEMA with `client_nonce = 0`), uses the same mode as the original session (not the mode in the app's settings), and its `actual_fps` and `max_udp_size` are at most the `requested_fps` and `max_udp_size` of the original HELLO.
+
+Over TCP this works as when the user leaves the tracking screen: the connection closes without an ERROR, and a session that a receiver (PC) started does not start again.
 
 </details>
 
@@ -544,7 +551,7 @@ Main reasons (other texts can also arrive; display the received text as it is):
 | `BUSY` | iOS is already streaming v3 to another receiver, is sending with v1/v2 or Bluetooth, is transferring a recording (in iFacialMocap and iFacialMocapTr, only a transfer over Bluetooth; 3.8.1), or is exporting an FBX file. In iFacialMocap and iFacialMocapTr, this is also the reason while a destination is set on the iOS side (a manual start or a v1/v2 destination). Exception: v1/v2 streaming that a PC handshake started does not give `BUSY`; it is replaced (in Facemotion3d, only streaming to the software name "Other"; 3.8.1) |
 | `NOT_ALLOWED` | Purchase state or trial time does not allow streaming now |
 | `PC_CONNECTION_DISABLED` | "Settings → Other functions → No connection accepted from PC" is on in Facemotion3d (the answer to a UDP HELLO). While this setting is on, iOS does not listen on TCP 49984, so over TCP the connection itself fails. A manual start from iOS still works |
-| `V3_NOT_AVAILABLE`, `APP_INACTIVE` | The app is not showing its tracking screen, is in the background, or cannot use the camera. In iFacialMocapTr this is also the reason when trial conditions do not allow streaming now |
+| `V3_NOT_AVAILABLE`, `APP_INACTIVE` | The app is not showing its tracking screen, is in the background, or cannot use the camera. In iFacialMocapTr this is also the reason when trial conditions do not allow streaming now. `APP_INACTIVE` is also sent when a full-screen ad covers the tracking screen during a UDP session ([section 2](#udp)) |
 | `CAMERA_UNAVAILABLE` | The device does not support face tracking, or camera access is not allowed |
 | `SCHEMA_NOT_READY` | The app could not prepare the first table within 5 s. A face that has not been found yet is not a reason ([3.6](#frame)) |
 | `UNSUPPORTED_CONTRACT: requires 6` | The HELLO had another revision. iOS never switches to the revision-5 format (JSON) |
@@ -655,7 +662,7 @@ All times are defaults in seconds. "Valid" means a message that passed every che
 
 - **Recovery** = send SCHEMA_ACK for the stored table again (UDP only) and send GET_SCHEMA with `schema_id = 0`.
 - The FRAME timer starts when the first SCHEMA is stored and restarts with every new valid FRAME. SCHEMA and PONG do **not** restart it. A frame with the face lost still counts.
-- **WAITING** is not an exit. Keep the port open and keep reading. Send nothing on a timer (no HELLO, PING, GET_SCHEMA or reconnect). Answer a valid SCHEMA with SCHEMA_ACK. A valid FRAME returns to streaming. A manual start from iOS can begin a new session.
+- **WAITING** is not an exit. Keep the port open and keep reading. Send nothing on a timer (no HELLO, PING, GET_SCHEMA or reconnect). Answer a valid SCHEMA with SCHEMA_ACK. A valid FRAME returns to streaming. A manual start from iOS can begin a new session. The automatic start after a full-screen ad ([section 2](#udp)) arrives in WAITING as a manual-start SCHEMA (`client_nonce = 0`): accept it as a new session, and reset the stored SCHEMA and the last FRAME `sequence` (not only when you send a HELLO).
 - While a session is streaming, a SCHEMA from another session is ignored: nobody can take over a running stream, not even a new session from the same sender.
 
 <details>
