@@ -6,6 +6,8 @@
 
 図（英語）：[接続の流れ](diagrams/fmv3_flow.svg) · [メッセージの構造](diagrams/fmv3_messages.svg)
 
+受信側の状態（英語）：[詳細](diagrams/fmv3_receiver_state_detailed.png) · [通常の開始](diagrams/fmv3_receiver_state_simple.png)（元の図：[@SpitballEngineering](https://www.youtube.com/@SpitballEngineering)）
+
 Python 3.10以上で動き、`pip install`は不要です。実機のiPhone/iPadと通信するだけなら**`face_motion_v3.py`だけ**で足ります。macOSでは必要に応じて`python`を`python3`に置き換えてください。
 
 ## 1. UDPで受信する（推奨）

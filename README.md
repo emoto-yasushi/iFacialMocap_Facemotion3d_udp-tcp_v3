@@ -6,6 +6,8 @@ Receive BlendShape values, head rotation and position, and eye rotation from **i
 
 Pictures: [connection flows](diagrams/fmv3_flow.svg) · [message layout](diagrams/fmv3_messages.svg)
 
+Receiver states: [detailed](diagrams/fmv3_receiver_state_detailed.png) · [normal start](diagrams/fmv3_receiver_state_simple.png) (original diagrams by [@SpitballEngineering](https://www.youtube.com/@SpitballEngineering))
+
 Python 3.10 or later, no `pip install`. For a real iPhone/iPad you only need **`face_motion_v3.py`**. On macOS, type `python3` instead of `python` if needed.
 
 ## 1. Receive over UDP (recommended)
