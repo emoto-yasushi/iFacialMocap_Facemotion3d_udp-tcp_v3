@@ -1359,7 +1359,7 @@ def format_frame_log(frame: Frame, received_frames: int) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--host", help="iPhone/iPad address (normal start); also the only accepted sender")
+    parser.add_argument("--host", help="iPhone/iPad/Android address (normal start); also the only accepted sender")
     parser.add_argument("--listen", action="store_true", help="wait for a manual start from iOS; send nothing first")
     parser.add_argument("--transport", choices=("udp", "tcp"), default="udp")
     parser.add_argument("--mode", choices=("variable", "fixed52"), default="variable",

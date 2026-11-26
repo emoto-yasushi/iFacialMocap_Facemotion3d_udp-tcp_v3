@@ -1,6 +1,6 @@
 # Face Motion v3 — 受信サンプル（UDP / TCP）
 
-**iFacialMocap**・**iFacialMocapTr**・**Facemotion3d**から、BlendShapeの値と、頭の回転・位置、目の回転を受け取ります。
+**iFacialMocap**・**iFacialMocapTr**・**Facemotion3d**から、BlendShapeの値と、頭の回転・位置、目の回転を受け取ります。以下では、データを送るアプリを「iOS」と呼びます。iFacialMocapのAndroid版も含みます。
 
 [English](README.md) · [仕様書](PROTOCOL_V3_JA.md) · [変更点](CHANGELOG.md) · [MITライセンス](LICENSE)
 
@@ -8,11 +8,11 @@
 
 受信側の状態（英語）：[詳細](diagrams/fmv3_receiver_state_detailed.png) · [通常の開始](diagrams/fmv3_receiver_state_simple.png)（元の図：[@SpitballEngineering](https://www.youtube.com/@SpitballEngineering)）
 
-Python 3.10以上で動き、`pip install`は不要です。実機のiPhone/iPadと通信するだけなら**`face_motion_v3.py`だけ**で足ります。macOSでは必要に応じて`python`を`python3`に置き換えてください。
+Python 3.10以上で動き、`pip install`は不要です。実機のiPhone/iPad/Androidと通信するだけなら**`face_motion_v3.py`だけ**で足ります。macOSでは必要に応じて`python`を`python3`に置き換えてください。
 
 ## 1. UDPで受信する（推奨）
 
-`PHONE_IP`をiPhone/iPadのLAN内アドレスに置き換えます。
+`PHONE_IP`をiPhone/iPad/AndroidのLAN内アドレスに置き換えます。
 
 ```sh
 python face_motion_v3.py --host PHONE_IP
@@ -84,6 +84,7 @@ iPhoneからの送信が止まっても、受信側（PC）は終了しません
 | アプリ | バージョン |
 |---|---|
 | iFacialMocap | 1.5.3以降 |
+| iFacialMocap（Android版） | 1.5.3以降 |
 | iFacialMocapTr | 1.2.6以降 |
 | Facemotion3d | 1.4.6以降（OtherライセンスまたはUnityライセンス） |
 

@@ -1,6 +1,6 @@
 # Face Motion v3 — receiver sample (UDP / TCP)
 
-Receive BlendShape values, head rotation and position, and eye rotation from **iFacialMocap**, **iFacialMocapTr** or **Facemotion3d**.
+Receive BlendShape values, head rotation and position, and eye rotation from **iFacialMocap**, **iFacialMocapTr** or **Facemotion3d**. Below, the app that sends the data is called "iOS". This also means the Android version of iFacialMocap.
 
 [日本語](README_JA.md) · [Specification](PROTOCOL_V3.md) · [Changes](CHANGELOG.md) · [MIT License](LICENSE)
 
@@ -8,11 +8,11 @@ Pictures: [connection flows](diagrams/fmv3_flow.svg) · [message layout](diagram
 
 Receiver states: [detailed](diagrams/fmv3_receiver_state_detailed.png) · [normal start](diagrams/fmv3_receiver_state_simple.png) (original diagrams by [@SpitballEngineering](https://www.youtube.com/@SpitballEngineering))
 
-Python 3.10 or later, no `pip install`. For a real iPhone/iPad you only need **`face_motion_v3.py`**. On macOS, type `python3` instead of `python` if needed.
+Python 3.10 or later, no `pip install`. For a real iPhone/iPad/Android device you only need **`face_motion_v3.py`**. On macOS, type `python3` instead of `python` if needed.
 
 ## 1. Receive over UDP (recommended)
 
-Replace `PHONE_IP` with the iPhone/iPad's address on your LAN:
+Replace `PHONE_IP` with the address of the iPhone/iPad/Android device on your LAN:
 
 ```sh
 python face_motion_v3.py --host PHONE_IP
@@ -84,6 +84,7 @@ The receiver (PC) never quits because the phone went quiet. After a few retries 
 | App | Version |
 |---|---|
 | iFacialMocap | 1.5.3 or later |
+| iFacialMocap (Android) | 1.5.3 or later |
 | iFacialMocapTr | 1.2.6 or later |
 | Facemotion3d | 1.4.6 or later ("Other" or "Unity" license) |
 

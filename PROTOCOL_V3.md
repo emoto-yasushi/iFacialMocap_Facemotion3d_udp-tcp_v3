@@ -2,7 +2,7 @@
 
 [日本語](PROTOCOL_V3_JA.md) · [README](README.md) · [Changes](CHANGELOG.md)
 
-**Contract revision 6** (the version of this protocol). This document is for people who write a program that *receives* motion data from **iFacialMocap**, **iFacialMocapTr** or **Facemotion3d**. Below, the program that receives the data on a PC or an embedded device is called the "**receiver (PC)**", and the iPhone/iPad app that sends it is called "**iOS**".
+**Contract revision 6** (the version of this protocol). This document is for people who write a program that *receives* motion data from **iFacialMocap**, **iFacialMocapTr** or **Facemotion3d**. Below, the program that receives the data on a PC or an embedded device is called the "**receiver (PC)**", and the iPhone/iPad/Android app that sends it is called "**iOS**". In this document, "iOS" also means the Android version of iFacialMocap.
 
 Face Motion v3 (FMV3) uses binary messages (no JSON is used on the wire). iOS first sends a **SCHEMA** (the table) once, with the **mode** and **how to read the numbers** (for example, how many bytes one value uses). After that, every frame is a **FRAME** that carries only numbers, in a fixed order. The head and eye values have no names; they always follow the BlendShape numbers in a fixed order. The receiver (PC) therefore never parses text per frame; it just reads numbers by position. There are two modes, which differ in whether the BlendShape names are sent ([1.4](#modes)).
 
@@ -185,7 +185,7 @@ For a manual start, set up the iOS app as follows. The mode setting is used only
 <details>
 <summary>Details: a manual-start SCHEMA that arrives while you wait for the answer to your HELLO</summary>
 
-While the receiver (PC) is waiting for the answer to its HELLO in a normal start, a SCHEMA with `client_nonce = 0` may arrive, because sending was started on the iOS side. Accept this SCHEMA too, as a manual start. After accepting it, stop resending the HELLO. The reference receiver accepts it only from the IP address of the iPhone/iPad that it sent the HELLO to (from any source port).
+While the receiver (PC) is waiting for the answer to its HELLO in a normal start, a SCHEMA with `client_nonce = 0` may arrive, because sending was started on the iOS side. Accept this SCHEMA too, as a manual start. After accepting it, stop resending the HELLO. The reference receiver accepts it only from the IP address of the iPhone/iPad/Android device that it sent the HELLO to (from any source port).
 
 When this happens, iOS refuses the HELLO with an ERROR (usually `BUSY`). This ERROR often arrives before the manual-start SCHEMA. If it does, enter WAITING ([section 5](#timers)), keep the port open, and accept the manual-start SCHEMA that arrives later. Ignore an ERROR that arrives after you accepted the manual-start SCHEMA ([3.8](#error)). Also ignore a SCHEMA that answers that HELLO while the manual-start session is streaming.
 
